@@ -8,6 +8,9 @@ import (
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/glamour/ansi"
+	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/volcanic001/alice/internal/chat"
@@ -43,6 +46,9 @@ type Model struct {
 	draft         string
 	busy          bool
 	status        string
+	markdown      *glamour.TermRenderer
+	markdownWidth int
+	markdownCache map[string]string
 }
 
 func New(database *store.Store, provider chat.Provider) (Model, error) {
@@ -73,7 +79,7 @@ func New(database *store.Store, provider chat.Provider) (Model, error) {
 	input.Focus()
 	view := viewport.New(1, 1)
 	view.MouseWheelEnabled = true
-	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input}
+	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string)}
 	model.refresh()
 	return model, nil
 }
@@ -236,22 +242,89 @@ func (m *Model) resize() {
 
 func (m *Model) refresh() {
 	width := max(20, m.viewport.Width-2)
+	messageWidth := max(10, width-4)
+	markdownWidth := max(10, messageWidth-2)
 	var body strings.Builder
 	if len(m.messages) == 0 && m.draft == "" {
 		body.WriteString("\n" + logoStyle.Render("Hola, soy Alice.") + "\n" + mutedStyle.Render("¿En qué puedo ayudarte hoy?"))
 	}
 	for _, message := range m.messages {
 		if message.Role == "user" {
-			body.WriteString(userStyle.Width(max(10, width-4)).Render("Tú\n" + message.Content))
+			body.WriteString(userStyle.Width(messageWidth).Render("Tú\n" + message.Content))
 		} else {
-			body.WriteString(aliceStyle.Width(max(10, width-4)).Render("Alice\n" + message.Content))
+			body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.renderMarkdown(message.Content, markdownWidth)))
 		}
 		body.WriteString("\n")
 	}
 	if m.draft != "" {
-		body.WriteString(aliceStyle.Width(max(10, width-4)).Render("Alice\n" + m.draft + " ▌"))
+		body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.draft + " ▌"))
 	}
 	m.viewport.SetContent(body.String())
+}
+
+func (m *Model) renderMarkdown(source string, width int) string {
+	if m.markdown == nil || m.markdownWidth != width {
+		style := markdownStyle()
+		renderer, err := glamour.NewTermRenderer(glamour.WithStyles(style), glamour.WithWordWrap(width))
+		if err != nil {
+			return source
+		}
+		m.markdown = renderer
+		m.markdownWidth = width
+		m.markdownCache = make(map[string]string)
+	}
+	if rendered, ok := m.markdownCache[source]; ok {
+		return rendered
+	}
+	rendered, err := m.markdown.Render(source)
+	if err != nil {
+		return source
+	}
+	rendered = strings.Trim(rendered, "\n")
+	m.markdownCache[source] = rendered
+	return rendered
+}
+
+func markdownStyle() ansi.StyleConfig {
+	style := styles.DarkStyleConfig
+	zero := uint(0)
+	one := uint(1)
+	bold := true
+	italic := true
+	text := "#E8E6F0"
+	heading := "#A995FF"
+	accent := "#FF7A90"
+	mutedText := "#777184"
+	quote := "│ "
+
+	style.Document.Margin = &zero
+	style.Document.BlockPrefix = ""
+	style.Document.BlockSuffix = ""
+	style.Document.Color = &text
+	style.BlockQuote.Indent = &one
+	style.BlockQuote.IndentToken = &quote
+	style.BlockQuote.Color = &mutedText
+	style.List.LevelIndent = 2
+	style.Heading.BlockSuffix = "\n"
+	style.Heading.Color = &heading
+	style.Heading.Bold = &bold
+	style.H1.Prefix, style.H1.Suffix = "", ""
+	style.H1.BackgroundColor = nil
+	style.H1.Color = &accent
+	style.H2.Prefix, style.H3.Prefix = "", ""
+	style.H2.Color, style.H3.Color = &heading, &heading
+	style.H4.Prefix, style.H5.Prefix, style.H6.Prefix = "", "", ""
+	style.H4.Color, style.H5.Color, style.H6.Color = &heading, &heading, &mutedText
+	style.H6.Bold = &bold
+	style.Strong.Bold = &bold
+	style.Emph.Italic = &italic
+	style.Item.BlockPrefix = "• "
+	style.Code.Color = &accent
+	style.CodeBlock.Margin = &zero
+	style.CodeBlock.Indent = &one
+	style.Link.Color = &heading
+	style.LinkText.Color = &heading
+	return style
 }
 
 func (m Model) View() string {
