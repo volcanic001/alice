@@ -65,7 +65,7 @@ func New(database *store.Store, provider chat.Provider) (Model, error) {
 	input.Placeholder = "Escribe un mensaje…"
 	input.Prompt = "› "
 	input.CharLimit = 16000
-	input.SetHeight(3)
+	input.SetHeight(1)
 	input.ShowLineNumbers = false
 	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
 	input.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(coral).Bold(true)
