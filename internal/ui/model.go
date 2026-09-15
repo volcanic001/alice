@@ -38,12 +38,13 @@ type screen int
 const (
 	chatScreen screen = iota
 	historyScreen
+	helpScreen
 )
 
 const (
 	horizontalMargin = 2
 	maxColumnWidth   = 84
-	helpText         = "Enter enviar · Shift+Enter salto · Ctrl+N nuevo · Ctrl+H historial · PgUp/PgDn páginas · Inicio/Fin · Esc cancelar"
+	helpText         = "Enter enviar · Ctrl+N nuevo · Ctrl+H historial · /help ayuda"
 )
 
 type columnLayout struct {
@@ -147,6 +148,19 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == historyScreen && m.deleteConfirm {
 			return m.updateHistory(key)
 		}
+		if m.screen == helpScreen {
+			switch key {
+			case "esc":
+				return m.showChat()
+			case "ctrl+n":
+				if !m.busy {
+					return m.newConversation()
+				}
+			case "ctrl+h":
+				return m.showHistory()
+			}
+			return m, nil
+		}
 		if key == "ctrl+n" {
 			if !m.busy {
 				return m.newConversation()
@@ -165,9 +179,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 		case "ctrl+h":
-			m.screen = historyScreen
-			m.historyIndex = m.currentConversationIndex()
-			return m, nil
+			return m.showHistory()
 		case "enter":
 			if !m.busy && strings.TrimSpace(m.input.Value()) != "" {
 				return m.send()
@@ -239,6 +251,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m Model) send() (tea.Model, tea.Cmd) {
 	content := strings.TrimSpace(m.input.Value())
+	if next, command, handled := m.runLocalCommand(content); handled {
+		return next, command
+	}
 	if err := m.store.AddMessage(m.conversation.ID, "user", content); err != nil {
 		m.status = err.Error()
 		return m, nil
@@ -254,6 +269,49 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.refresh()
 	m.goToPage(m.totalPages - 1)
 	return m, waitForEvent(m.stream)
+}
+
+// runLocalCommand handles exact, known commands and keeps unknown slash-led
+// input local. Text that does not start with a slash follows the provider path.
+func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
+	switch content {
+	case "/help":
+		m.input.Reset()
+		next, command := m.showHelp()
+		return next, command, true
+	case "/new":
+		m.input.Reset()
+		next, command := m.newConversation()
+		return next, command, true
+	case "/history":
+		m.input.Reset()
+		next, command := m.showHistory()
+		return next, command, true
+	default:
+		if strings.HasPrefix(content, "/") {
+			command := strings.Fields(content)[0]
+			m.input.Reset()
+			m.status = fmt.Sprintf("Comando desconocido: %s\nUsa /help para ver los comandos disponibles.", command)
+			return m, nil, true
+		}
+		return m, nil, false
+	}
+}
+
+func (m Model) showHistory() (tea.Model, tea.Cmd) {
+	m.screen = historyScreen
+	m.historyIndex = m.currentConversationIndex()
+	return m, nil
+}
+
+func (m Model) showHelp() (tea.Model, tea.Cmd) {
+	m.screen = helpScreen
+	return m, nil
+}
+
+func (m Model) showChat() (tea.Model, tea.Cmd) {
+	m.screen = chatScreen
+	return m, m.input.Focus()
 }
 
 func (m Model) openRelative(delta int) (tea.Model, tea.Cmd) {
@@ -316,8 +374,7 @@ func (m Model) updateHistory(key string) (tea.Model, tea.Cmd) {
 
 	switch key {
 	case "ctrl+h", "esc":
-		m.screen = chatScreen
-		return m, m.input.Focus()
+		return m.showChat()
 	case "/":
 		m.searchInput = newHistorySearchInput(m.viewport.Width)
 		m.searchActive = true
@@ -572,7 +629,7 @@ func (m Model) conversationHeight() int {
 	headerLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(header))
 	statusLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(status))
 	inputLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).BorderTop(true).Render(m.input.View()))
-	helpLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(helpText))
+	helpLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(compactFooter(m.viewport.Width)))
 	return max(4, m.height-headerLines-statusLines-inputLines-helpLines)
 }
 
@@ -706,6 +763,9 @@ func (m Model) View() string {
 	if m.screen == historyScreen {
 		return m.historyView()
 	}
+	if m.screen == helpScreen {
+		return m.helpView()
+	}
 	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
 	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
 	main := lipgloss.NewStyle().Width(m.viewport.Width).Render(lipgloss.JoinVertical(lipgloss.Left,
@@ -713,9 +773,36 @@ func (m Model) View() string {
 		m.viewport.View(),
 		lipgloss.NewStyle().Foreground(muted).Render(m.status+"  "+page),
 		lipgloss.NewStyle().BorderTop(true).BorderForeground(surface).Render(m.input.View()),
-		mutedStyle.Render(helpText),
+		mutedStyle.Render(compactFooter(m.viewport.Width)),
 	))
 	return m.placeColumn(main)
+}
+
+func (m Model) helpView() string {
+	var body strings.Builder
+	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
+	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
+	body.WriteString("/help        Mostrar ayuda\n/new         Nuevo chat\n/history     Historial\n\n")
+	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
+	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
+	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")
+	body.WriteString("Enter        Enviar\nShift+Enter  Salto de línea\nPgUp/PgDn    Cambiar página\nHome/End     Inicio / final\nEsc          Volver\n")
+	column := lipgloss.NewStyle().Width(m.viewport.Width).Render(body.String())
+	return m.placeColumn(column)
+}
+
+func compactFooter(width int) string {
+	if width < 1 {
+		return ""
+	}
+	runes := []rune(helpText)
+	if len(runes) <= width {
+		return helpText
+	}
+	if width == 1 {
+		return "…"
+	}
+	return string(runes[:width-1]) + "…"
 }
 
 func (m Model) historyView() string {

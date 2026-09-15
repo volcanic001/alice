@@ -152,7 +152,7 @@ func TestColumnWidthUsesTerminalWidthAndCentersWideChat(t *testing.T) {
 
 func TestResizeRecalculatesColumnWidthAndPages(t *testing.T) {
 	model := testScreenModel(t)
-	model.messages = append(model.messages, chat.Message{Role: "user", Content: strings.Repeat("palabra ", 240)})
+	model.messages = append(model.messages, chat.Message{Role: "user", Content: strings.Repeat("palabra ", 600)})
 	next, _ := model.Update(tea.WindowSizeMsg{Width: 48, Height: 30})
 	model = next.(Model)
 	narrowPages := model.totalPages
