@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -15,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/volcanic001/alice/internal/chat"
+	"github.com/volcanic001/alice/internal/clipboard"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/usage"
 )
@@ -33,6 +36,7 @@ var (
 
 type streamMsg chat.Event
 type errMsg struct{ err error }
+type copyMsg struct{ err error }
 
 type screen int
 
@@ -47,6 +51,7 @@ const (
 	horizontalMargin = 2
 	maxColumnWidth   = 84
 	helpText         = "Enter enviar · Ctrl+N nuevo · Ctrl+H historial · /help ayuda"
+	copyTimeout      = 2 * time.Second
 )
 
 type columnLayout struct {
@@ -55,35 +60,37 @@ type columnLayout struct {
 	rightMargin  int
 }
 type Model struct {
-	store         *store.Store
-	provider      chat.Provider
-	conversations []chat.Conversation
-	conversation  chat.Conversation
-	messages      []chat.Message
-	viewport      viewport.Model
-	input         textarea.Model
-	width, height int
-	stream        <-chan chat.Event
-	cancel        context.CancelFunc
-	usageRecords  []chat.UsageRecord
-	pendingUsage  *chat.UsageRecord
-	usageStore    *usage.Store
-	draft         string
-	busy          bool
-	status        string
-	markdown      *glamour.TermRenderer
-	markdownWidth int
-	markdownCache map[string]string
-	pages         []string
-	currentPage   int
-	totalPages    int
-	screen        screen
-	historyIndex  int
-	deleteConfirm bool
-	renameActive  bool
-	renameInput   textarea.Model
-	searchActive  bool
-	searchInput   textarea.Model
+	store            *store.Store
+	provider         chat.Provider
+	conversations    []chat.Conversation
+	conversation     chat.Conversation
+	messages         []chat.Message
+	viewport         viewport.Model
+	input            textarea.Model
+	width, height    int
+	stream           <-chan chat.Event
+	cancel           context.CancelFunc
+	usageRecords     []chat.UsageRecord
+	pendingUsage     *chat.UsageRecord
+	usageStore       *usage.Store
+	draft            string
+	busy             bool
+	status           string
+	markdown         *glamour.TermRenderer
+	markdownWidth    int
+	markdownCache    map[string]string
+	pages            []string
+	currentPage      int
+	totalPages       int
+	screen           screen
+	historyIndex     int
+	deleteConfirm    bool
+	renameActive     bool
+	renameInput      textarea.Model
+	searchActive     bool
+	searchInput      textarea.Model
+	clipboardWrite   func(context.Context, string) error
+	clipboardTimeout time.Duration
 }
 
 func New(database *store.Store, provider chat.Provider, usageStores ...*usage.Store) (Model, error) {
@@ -121,7 +128,7 @@ func New(database *store.Store, provider chat.Provider, usageStores ...*usage.St
 	input.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
 	input.Focus()
 	view := viewport.New(1, 1)
-	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string), usageStore: usageStore, usageRecords: usageRecords}
+	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string), usageStore: usageStore, usageRecords: usageRecords, clipboardWrite: clipboard.Write, clipboardTimeout: copyTimeout}
 	model.refresh()
 	return model, nil
 }
@@ -272,6 +279,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		return m, waitForEvent(m.stream)
 	case errMsg:
 		m.status = message.err.Error()
+	case copyMsg:
+		if message.err != nil {
+			m.status = clipboardUnavailableStatus()
+		} else {
+			m.status = "✓ Respuesta copiada"
+		}
 	}
 
 	var command tea.Cmd
@@ -313,7 +326,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 // input local. Text that does not start with a slash follows the provider path.
 func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 	switch content {
-	case "/help", "/ayuda":
+	case "/help":
 		m.input.Reset()
 		next, command := m.showHelp()
 		return next, command, true
@@ -329,6 +342,10 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 		m.input.Reset()
 		next, command := m.showHistory()
 		return next, command, true
+	case "/copy":
+		m.input.Reset()
+		next, command := m.copyLastResponse()
+		return next, command, true
 	default:
 		if strings.HasPrefix(content, "/") {
 			command := strings.Fields(content)[0]
@@ -338,6 +355,29 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, false
 	}
+}
+
+func (m Model) copyLastResponse() (tea.Model, tea.Cmd) {
+	for i := len(m.messages) - 1; i >= 0; i-- {
+		if m.messages[i].Role != "assistant" {
+			continue
+		}
+		content := m.messages[i].Content
+		return m, func() tea.Msg {
+			ctx, cancel := context.WithTimeout(context.Background(), m.clipboardTimeout)
+			defer cancel()
+			return copyMsg{err: m.clipboardWrite(ctx, content)}
+		}
+	}
+	m.status = "No hay ninguna respuesta para copiar."
+	return m, nil
+}
+
+func clipboardUnavailableStatus() string {
+	if runtime.GOOS == "android" {
+		return "✗ Portapapeles no disponible · /copy requiere Termux:API en Android"
+	}
+	return "✗ Portapapeles no disponible"
 }
 
 func (m Model) showStats() (tea.Model, tea.Cmd) {
@@ -832,7 +872,7 @@ func (m Model) helpView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
 	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
-	body.WriteString("/help        Mostrar ayuda\n/ayuda       Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n\n")
+	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")

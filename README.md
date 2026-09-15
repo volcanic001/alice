@@ -49,6 +49,17 @@ export DEEPSEEK_API_KEY="tu_clave"
 Alice guarda el historial en `~/.config/alice/alice.db`. Puedes cambiar el
 endpoint compatible mediante `DEEPSEEK_BASE_URL`.
 
+### Portapapeles en Termux
+
+El comando `/copy` requiere las dos partes de Termux:API:
+
+- el paquete `termux-api`, que se instala con `pkg install termux-api`;
+- la aplicación Android complementaria **Termux:API**.
+
+Estas dependencias son opcionales y sólo se necesitan para `/copy`. Alice puede
+iniciarse y utilizarse normalmente sin instalarlas; en ese caso, `/copy` muestra
+un aviso si el portapapeles no está disponible.
+
 ## Atajos
 
 | Tecla | Acción |

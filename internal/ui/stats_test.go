@@ -138,13 +138,11 @@ func TestStatsWideTerminalUsesTwoColumns(t *testing.T) {
 	}
 }
 
-func TestHelpAliasesIncludeStats(t *testing.T) {
-	for _, command := range []string{"/help", "/ayuda"} {
-		model, provider := testCommandModel(t)
-		model = submitInput(t, model, command)
-		view := xansi.Strip(model.View())
-		if model.screen != helpScreen || len(provider.requests) != 0 || !strings.Contains(view, "/stats") {
-			t.Fatalf("%s no muestra /stats localmente: screen=%d requests=%d view=%q", command, model.screen, len(provider.requests), view)
-		}
+func TestHelpIncludesStats(t *testing.T) {
+	model, provider := testCommandModel(t)
+	model = submitInput(t, model, "/help")
+	view := xansi.Strip(model.View())
+	if model.screen != helpScreen || len(provider.requests) != 0 || !strings.Contains(view, "/stats") {
+		t.Fatalf("/help no muestra /stats localmente: screen=%d requests=%d view=%q", model.screen, len(provider.requests), view)
 	}
 }
