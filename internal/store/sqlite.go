@@ -21,6 +21,7 @@ func Open(path string) (*Store, error) {
 		`PRAGMA foreign_keys=ON`,
 		`CREATE TABLE IF NOT EXISTS conversations (
 			id INTEGER PRIMARY KEY, title TEXT NOT NULL DEFAULT 'Nuevo chat',
+			manual_title INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
 			updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 		)`,
@@ -36,7 +37,37 @@ func Open(path string) (*Store, error) {
 			return nil, fmt.Errorf("inicializar SQLite: %w", err)
 		}
 	}
+	if err := ensureManualTitleColumn(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrar SQLite: %w", err)
+	}
 	return &Store{db: db}, nil
+}
+
+func ensureManualTitleColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(conversations)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue sql.NullString
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == "manual_title" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE conversations ADD COLUMN manual_title INTEGER NOT NULL DEFAULT 0`)
+	return err
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -67,6 +98,18 @@ func (s *Store) CreateConversation() (chat.Conversation, error) {
 	return chat.Conversation{ID: id, Title: "Nuevo chat"}, err
 }
 
+func (s *Store) DeleteConversation(conversationID int64) error {
+	_, err := s.db.Exec(`DELETE FROM conversations WHERE id=?`, conversationID)
+	return err
+}
+
+// RenameConversation records a user-chosen title without changing the history
+// ordering. A manual title is never replaced by automatic title generation.
+func (s *Store) RenameConversation(conversationID int64, title string) error {
+	_, err := s.db.Exec(`UPDATE conversations SET title=?, manual_title=1 WHERE id=?`, title, conversationID)
+	return err
+}
+
 func (s *Store) Messages(conversationID int64) ([]chat.Message, error) {
 	rows, err := s.db.Query(`SELECT id, conversation_id, role, content FROM messages WHERE conversation_id=? ORDER BY id`, conversationID)
 	if err != nil {
@@ -94,7 +137,7 @@ func (s *Store) AddMessage(conversationID int64, role, content string) error {
 		return err
 	}
 	if role == "user" {
-		if _, err = transaction.Exec(`UPDATE conversations SET title=CASE WHEN title='Nuevo chat' THEN substr(?,1,48) ELSE title END, updated_at=CURRENT_TIMESTAMP WHERE id=?`, content, conversationID); err != nil {
+		if _, err = transaction.Exec(`UPDATE conversations SET title=CASE WHEN manual_title=0 AND title='Nuevo chat' THEN substr(?,1,48) ELSE title END, updated_at=CURRENT_TIMESTAMP WHERE id=?`, content, conversationID); err != nil {
 			return err
 		}
 	} else {

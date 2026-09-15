@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/volcanic001/alice/internal/provider"
 	"github.com/volcanic001/alice/internal/store"
 
@@ -104,5 +106,54 @@ func TestCompleteStreamingFlow(t *testing.T) {
 	}
 	if len(current.markdownCache) != 1 || strings.Contains(xansi.Strip(current.viewport.View()), "**") {
 		t.Fatalf("Glamour no renderizó la respuesta final: cache=%d view=%q", len(current.markdownCache), xansi.Strip(current.viewport.View()))
+	}
+}
+
+func TestStreamErrorIsFriendlyAndLeavesChatUsable(t *testing.T) {
+	const exposedKey = "sk-secret-817e"
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(response, `{"error":{"message":"Authentication Fails, Your api key: %s is invalid"}}`, exposedKey)
+	}))
+	defer server.Close()
+
+	database, err := store.Open(filepath.Join(t.TempDir(), "alice.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	model, err := New(database, provider.DeepSeek{APIKey: "test", BaseURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, _ := model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	model = next.(Model)
+	model.input.SetValue("hola")
+
+	next, command := model.send()
+	current := next.(Model)
+	next, _ = current.Update(command())
+	current = next.(Model)
+	const expected = "⚠ Error de autenticación\nLa API key de DeepSeek no es válida."
+	if current.busy || current.cancel != nil || current.status != expected {
+		t.Fatalf("estado después del error: busy=%v cancel=%v status=%q", current.busy, current.cancel != nil, current.status)
+	}
+	if len(current.messages) != 1 || current.messages[0].Content != "hola" {
+		t.Fatalf("el error se guardó como respuesta: %#v", current.messages)
+	}
+	if view := xansi.Strip(current.View()); strings.Contains(view, exposedKey) || strings.Contains(view, "Authentication Fails") {
+		t.Fatalf("la TUI expuso detalles de la API: %q", view)
+	}
+
+	current.input.SetValue("reintentar")
+	next, command = current.send()
+	current = next.(Model)
+	if !current.busy || command == nil {
+		t.Fatalf("el input no quedó utilizable: busy=%v command=%v", current.busy, command != nil)
+	}
+	next, _ = current.Update(command())
+	current = next.(Model)
+	if current.busy {
+		t.Fatal("la reintento dejó la interfaz generando")
 	}
 }

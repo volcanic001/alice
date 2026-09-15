@@ -2,6 +2,7 @@ package ui
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -72,6 +73,11 @@ type Model struct {
 	totalPages    int
 	screen        screen
 	historyIndex  int
+	deleteConfirm bool
+	renameActive  bool
+	renameInput   textarea.Model
+	searchActive  bool
+	searchInput   textarea.Model
 }
 
 func New(database *store.Store, provider chat.Provider) (Model, error) {
@@ -132,6 +138,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, tea.Quit
 		}
+		if m.screen == historyScreen && m.renameActive {
+			return m.updateRename(message, key)
+		}
+		if m.screen == historyScreen && m.searchActive {
+			return m.updateHistorySearch(message, key)
+		}
+		if m.screen == historyScreen && m.deleteConfirm {
+			return m.updateHistory(key)
+		}
 		if key == "ctrl+n" {
 			if !m.busy {
 				return m.newConversation()
@@ -178,8 +193,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		event := chat.Event(message)
 		if event.Err != nil {
 			m.busy = false
-			m.status = event.Err.Error()
 			m.cancel = nil
+			if errors.Is(event.Err, context.Canceled) {
+				m.status = "Respuesta cancelada"
+			} else {
+				m.status = event.Err.Error()
+			}
 			return m, nil
 		}
 		if event.Text != "" {
@@ -262,6 +281,10 @@ func (m Model) openConversation(index int) (tea.Model, tea.Cmd) {
 	}
 	m.messages = messages
 	m.screen = chatScreen
+	if m.searchActive {
+		m.searchActive = false
+		m.searchInput.Reset()
+	}
 	m.refresh()
 	m.goToPage(m.totalPages - 1)
 	return m, m.input.Focus()
@@ -281,21 +304,228 @@ func (m Model) newConversation() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) updateHistory(key string) (tea.Model, tea.Cmd) {
+	if m.deleteConfirm {
+		switch key {
+		case "y", "Y":
+			return m.deleteSelectedConversation()
+		case "n", "N", "esc":
+			m.deleteConfirm = false
+		}
+		return m, nil
+	}
+
 	switch key {
 	case "ctrl+h", "esc":
 		m.screen = chatScreen
 		return m, m.input.Focus()
+	case "/":
+		m.searchInput = newHistorySearchInput(m.viewport.Width)
+		m.searchActive = true
+		m.historyIndex = 0
+		return m, m.searchInput.Focus()
+	case "d", "delete", "backspace":
+		if m.selectedHistoryConversationIndex() >= 0 {
+			m.deleteConfirm = true
+		}
+	case "r":
+		if index := m.selectedHistoryConversationIndex(); index >= 0 {
+			m.renameInput = newRenameInput(m.conversations[index].Title, m.viewport.Width)
+			m.renameActive = true
+			return m, m.renameInput.Focus()
+		}
 	case "up":
 		if m.historyIndex > 0 {
 			m.historyIndex--
 		}
 	case "down":
-		if m.historyIndex < len(m.conversations)-1 {
+		if m.historyIndex < len(m.historyResults())-1 {
 			m.historyIndex++
 		}
 	case "enter":
-		return m.openConversation(m.historyIndex)
+		if index := m.selectedHistoryConversationIndex(); index >= 0 {
+			return m.openConversation(index)
+		}
 	}
+	return m, nil
+}
+
+func newHistorySearchInput(width int) textarea.Model {
+	input := textarea.New()
+	input.Prompt = "> "
+	input.SetHeight(1)
+	input.SetWidth(max(1, width))
+	input.ShowLineNumbers = false
+	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	input.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(coral).Bold(true)
+	return input
+}
+
+// historyResults derives the visible list from the conversations already held
+// by the UI. It deliberately does not read from storage.
+func (m Model) historyResults() []int {
+	query := strings.ToLower(strings.TrimSpace(m.searchInput.Value()))
+	results := make([]int, 0, len(m.conversations))
+	for index, conversation := range m.conversations {
+		if !m.searchActive || strings.Contains(strings.ToLower(conversation.Title), query) {
+			results = append(results, index)
+		}
+	}
+	return results
+}
+
+func (m Model) selectedHistoryConversationIndex() int {
+	results := m.historyResults()
+	if m.historyIndex < 0 || m.historyIndex >= len(results) {
+		return -1
+	}
+	return results[m.historyIndex]
+}
+
+func (m *Model) normalizeHistorySelection() {
+	results := m.historyResults()
+	if len(results) == 0 {
+		m.historyIndex = 0
+		return
+	}
+	m.historyIndex = min(max(0, m.historyIndex), len(results)-1)
+}
+
+func (m Model) updateHistorySearch(message tea.Msg, key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc":
+		m.searchActive = false
+		m.searchInput.Reset()
+		m.historyIndex = m.currentConversationIndex()
+		m.normalizeHistorySelection()
+		return m, nil
+	case "up":
+		if m.historyIndex > 0 {
+			m.historyIndex--
+		}
+		return m, nil
+	case "down":
+		if m.historyIndex < len(m.historyResults())-1 {
+			m.historyIndex++
+		}
+		return m, nil
+	case "enter":
+		if index := m.selectedHistoryConversationIndex(); index >= 0 {
+			return m.openConversation(index)
+		}
+		return m, nil
+	}
+
+	selectedID := int64(0)
+	if index := m.selectedHistoryConversationIndex(); index >= 0 {
+		selectedID = m.conversations[index].ID
+	}
+	var command tea.Cmd
+	m.searchInput, command = m.searchInput.Update(message)
+	if selectedID != 0 {
+		for resultIndex, conversationIndex := range m.historyResults() {
+			if m.conversations[conversationIndex].ID == selectedID {
+				m.historyIndex = resultIndex
+				return m, command
+			}
+		}
+	}
+	m.normalizeHistorySelection()
+	return m, command
+}
+
+func newRenameInput(title string, width int) textarea.Model {
+	input := textarea.New()
+	input.Prompt = "> "
+	input.SetValue(title)
+	input.CursorEnd()
+	input.SetHeight(1)
+	input.SetWidth(max(1, width))
+	input.ShowLineNumbers = false
+	input.FocusedStyle.CursorLine = lipgloss.NewStyle()
+	input.FocusedStyle.Prompt = lipgloss.NewStyle().Foreground(coral).Bold(true)
+	return input
+}
+
+func (m Model) updateRename(message tea.Msg, key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "esc":
+		m.renameActive = false
+		return m, nil
+	case "enter":
+		title := strings.TrimSpace(m.renameInput.Value())
+		m.renameActive = false
+		if title == "" {
+			m.status = "El título no puede estar vacío"
+			return m, nil
+		}
+		index := m.selectedHistoryConversationIndex()
+		if index < 0 {
+			return m, nil
+		}
+		selected := &m.conversations[index]
+		if err := m.store.RenameConversation(selected.ID, title); err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		selected.Title = title
+		if selected.ID == m.conversation.ID {
+			m.conversation.Title = title
+		}
+		m.normalizeHistorySelection()
+		return m, nil
+	}
+	var command tea.Cmd
+	m.renameInput, command = m.renameInput.Update(message)
+	return m, command
+}
+
+func (m Model) deleteSelectedConversation() (tea.Model, tea.Cmd) {
+	selectedIndex := m.selectedHistoryConversationIndex()
+	if selectedIndex < 0 {
+		m.deleteConfirm = false
+		return m, nil
+	}
+
+	deleted := m.conversations[selectedIndex]
+	if err := m.store.DeleteConversation(deleted.ID); err != nil {
+		m.deleteConfirm = false
+		m.status = err.Error()
+		return m, nil
+	}
+
+	m.conversations = append(m.conversations[:selectedIndex], m.conversations[selectedIndex+1:]...)
+	m.normalizeHistorySelection()
+	m.deleteConfirm = false
+
+	if deleted.ID != m.conversation.ID {
+		return m, nil
+	}
+	if len(m.conversations) > 0 {
+		selectedIndex = m.selectedHistoryConversationIndex()
+		if selectedIndex < 0 {
+			selectedIndex = 0
+		}
+		m.conversation = m.conversations[selectedIndex]
+		messages, err := m.store.Messages(m.conversation.ID)
+		if err != nil {
+			m.status = err.Error()
+			return m, nil
+		}
+		m.messages = messages
+		m.refresh()
+		return m, nil
+	}
+
+	conversation, err := m.store.CreateConversation()
+	if err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	m.conversations = []chat.Conversation{conversation}
+	m.conversation, m.messages = conversation, nil
+	m.historyIndex = 0
+	m.normalizeHistorySelection()
+	m.refresh()
 	return m, nil
 }
 
@@ -303,6 +533,12 @@ func (m *Model) resize() {
 	layout := m.columnLayout()
 	m.viewport.Width = layout.contentWidth
 	m.input.SetWidth(layout.contentWidth)
+	if m.renameActive {
+		m.renameInput.SetWidth(layout.contentWidth)
+	}
+	if m.searchActive {
+		m.searchInput.SetWidth(layout.contentWidth)
+	}
 	m.viewport.Height = m.conversationHeight()
 	m.refresh()
 }
@@ -485,20 +721,44 @@ func (m Model) View() string {
 func (m Model) historyView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("HISTORIAL") + "\n\n")
-	for index, conversation := range m.conversations {
-		prefix := "  "
-		style := mutedStyle
-		if index == m.historyIndex {
-			prefix = "● "
-			style = lipgloss.NewStyle().Foreground(lavender).Bold(true)
-		}
-		title := conversation.Title
-		if len([]rune(title)) > m.viewport.Width-4 {
-			title = string([]rune(title)[:m.viewport.Width-5]) + "…"
-		}
-		body.WriteString(style.Render(prefix+title) + "\n")
+	if m.searchActive {
+		body.WriteString("Buscar:\n" + m.searchInput.View() + "\n\n")
 	}
-	body.WriteString("\n" + mutedStyle.Render("↑/↓ seleccionar · Enter abrir · Esc volver"))
+	results := m.historyResults()
+	if len(m.conversations) == 0 {
+		body.WriteString(mutedStyle.Render("Sin conversaciones") + "\n")
+	} else if len(results) == 0 {
+		body.WriteString(mutedStyle.Render("Sin resultados") + "\n")
+	} else {
+		for resultIndex, conversationIndex := range results {
+			conversation := m.conversations[conversationIndex]
+			prefix := "  "
+			style := mutedStyle
+			if resultIndex == m.historyIndex {
+				prefix = "● "
+				style = lipgloss.NewStyle().Foreground(lavender).Bold(true)
+			}
+			title := conversation.Title
+			available := max(1, m.viewport.Width-4)
+			if len([]rune(title)) > available {
+				title = string([]rune(title)[:max(0, available-1)]) + "…"
+			}
+			body.WriteString(style.Render(prefix+title) + "\n")
+		}
+	}
+	if m.deleteConfirm {
+		if index := m.selectedHistoryConversationIndex(); index >= 0 {
+			body.WriteString("\n" + lipgloss.NewStyle().Foreground(coral).Render(fmt.Sprintf("Borrar %q? y/n", m.conversations[index].Title)) + "\n")
+		}
+	}
+	if m.renameActive {
+		body.WriteString("\nRenombrar:\n" + m.renameInput.View() + "\n")
+	}
+	help := "↑/↓ seleccionar · Enter abrir · / buscar · r renombrar · d borrar · Esc volver"
+	if m.searchActive {
+		help = "↑/↓ seleccionar · Enter abrir · Esc limpiar"
+	}
+	body.WriteString("\n" + mutedStyle.Render(help))
 	column := lipgloss.NewStyle().Width(m.viewport.Width).Render(body.String())
 	return m.placeColumn(column)
 }
