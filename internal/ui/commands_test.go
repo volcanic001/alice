@@ -168,7 +168,7 @@ func TestLocalCommandsUseSharedScreenActionsWithoutProvider(t *testing.T) {
 			t.Fatalf("/help no fue local: pantalla=%d requests=%d mensajes=%d input=%q", model.screen, len(provider.requests), len(model.messages), model.input.Value())
 		}
 		view := xansi.Strip(model.View())
-		for _, expected := range []string{"AYUDA", "COMANDOS", "/help", "/new", "/history", "NAVEGACIÓN", "Shift+Enter"} {
+		for _, expected := range []string{"AYUDA", "COMANDOS", "/help", "/stats", "/new", "/history", "NAVEGACIÓN", "Shift+Enter"} {
 			if !strings.Contains(view, expected) {
 				t.Fatalf("la ayuda no muestra %q: %q", expected, view)
 			}

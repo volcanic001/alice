@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -67,6 +68,7 @@ type Model struct {
 	usageRecords  []chat.UsageRecord
 	pendingUsage  *chat.UsageRecord
 	usageStore    *usage.Store
+	localOutput   string
 	draft         string
 	busy          bool
 	status        string
@@ -293,6 +295,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.status = "Alice está pensando…"
 	m.draft = ""
+	m.localOutput = ""
 	m.pendingUsage = nil
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
@@ -309,6 +312,10 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 	case "/help":
 		m.input.Reset()
 		next, command := m.showHelp()
+		return next, command, true
+	case "/stats":
+		m.input.Reset()
+		next, command := m.showStats()
 		return next, command, true
 	case "/new":
 		m.input.Reset()
@@ -327,6 +334,14 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 		}
 		return m, nil, false
 	}
+}
+
+func (m Model) showStats() (tea.Model, tea.Cmd) {
+	m.localOutput = renderUsageStats(m.usageRecords, time.Now())
+	m.status = "Listo"
+	m.currentPage = 0
+	m.refresh()
+	return m, nil
 }
 
 func (m Model) showHistory() (tea.Model, tea.Cmd) {
@@ -362,6 +377,7 @@ func (m Model) openConversation(index int) (tea.Model, tea.Cmd) {
 	if index < 0 || index >= len(m.conversations) {
 		return m, nil
 	}
+	m.localOutput = ""
 	m.conversation = m.conversations[index]
 	messages, err := m.store.Messages(m.conversation.ID)
 	if err != nil {
@@ -385,6 +401,7 @@ func (m Model) newConversation() (tea.Model, tea.Cmd) {
 		m.status = err.Error()
 		return m, nil
 	}
+	m.localOutput = ""
 	m.conversations = append([]chat.Conversation{conversation}, m.conversations...)
 	m.conversation, m.messages = conversation, nil
 	m.screen = chatScreen
@@ -668,8 +685,13 @@ func (m *Model) refresh() {
 	messageWidth := max(10, m.viewport.Width)
 	markdownWidth := max(10, messageWidth-2)
 	var body strings.Builder
-	if len(m.messages) == 0 && m.draft == "" {
+	if len(m.messages) == 0 && m.draft == "" && m.localOutput == "" {
 		body.WriteString("\n" + logoStyle.Render("Hola, soy Alice.") + "\n" + mutedStyle.Render("¿En qué puedo ayudarte hoy?"))
+	}
+	if m.localOutput != "" {
+		body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.localOutput))
+		m.setPages(body.String())
+		return
 	}
 	for _, message := range m.messages {
 		if message.Role == "user" {
@@ -813,7 +835,7 @@ func (m Model) helpView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
 	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
-	body.WriteString("/help        Mostrar ayuda\n/new         Nuevo chat\n/history     Historial\n\n")
+	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")
