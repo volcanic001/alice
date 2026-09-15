@@ -9,12 +9,77 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
+	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/provider"
 	"github.com/volcanic001/alice/internal/store"
 
 	xansi "github.com/charmbracelet/x/ansi"
 )
+
+func TestRenderUserMessageUsesMinimalTerminalLayout(t *testing.T) {
+	rendered := renderUserMessage("dame una ventaja de linux corto", 40)
+	plain := strings.TrimPrefix(xansi.Strip(rendered), "\n")
+	if plain != "┊ Tú\n  dame una ventaja de linux corto" {
+		t.Fatalf("presentación inesperada del usuario: %q", plain)
+	}
+	for name, style := range map[string]lipgloss.Style{
+		"marcador":  userMarkerStyle,
+		"etiqueta":  userLabelStyle,
+		"contenido": userContentStyle,
+	} {
+		if _, ok := style.GetBackground().(lipgloss.NoColor); !ok {
+			t.Fatalf("el estilo %s todavía tiene fondo: %v", name, style.GetBackground())
+		}
+	}
+}
+
+func TestRenderUserMessageWrapsWithContentIndent(t *testing.T) {
+	const width = 24
+	content := "explícame qué diferencia hay entre el kernel de Linux y el sistema operativo completo"
+	plain := strings.TrimPrefix(xansi.Strip(renderUserMessage(content, width)), "\n")
+	lines := strings.Split(plain, "\n")
+	if len(lines) < 4 || lines[0] != "┊ Tú" {
+		t.Fatalf("el mensaje largo no hizo wrap bajo su encabezado: %q", plain)
+	}
+	for _, line := range lines[1:] {
+		if !strings.HasPrefix(line, "  ") {
+			t.Fatalf("línea sin sangría de contenido: %q", line)
+		}
+		if lineWidth := xansi.StringWidth(line); lineWidth > width {
+			t.Fatalf("línea de ancho %d excede el ancho %d: %q", lineWidth, width, line)
+		}
+	}
+}
+
+func TestRenderUserMessagePreservesMultilineLayout(t *testing.T) {
+	content := "primera línea\nsegunda línea que también pertenece al usuario\n\núltima línea"
+	plain := strings.TrimPrefix(xansi.Strip(renderUserMessage(content, 60)), "\n")
+	want := "┊ Tú\n  primera línea\n  segunda línea que también pertenece al usuario\n  \n  última línea"
+	if plain != want {
+		t.Fatalf("presentación multilínea inesperada:\nwant: %q\n got: %q", want, plain)
+	}
+}
+
+func TestUserMessageKeepsHeaderInputAndContextMeter(t *testing.T) {
+	model := testScreenModel(t)
+	headerBefore := xansi.Strip(model.chatHeader(model.viewport.Width))
+	promptBefore := model.input.Prompt
+	model.messages = []chat.Message{{Role: "user", Content: "hola"}}
+	model.refresh()
+	headerAfter := xansi.Strip(model.chatHeader(model.viewport.Width))
+
+	if headerAfter != headerBefore || !strings.Contains(headerAfter, "◆ ALICE") || !strings.Contains(headerAfter, "Context") {
+		t.Fatalf("el header o Context Meter cambió: antes=%q después=%q", headerBefore, headerAfter)
+	}
+	if model.input.Prompt != promptBefore || model.input.Prompt != "› " {
+		t.Fatalf("el indicador del input cambió: antes=%q después=%q", promptBefore, model.input.Prompt)
+	}
+	if view := xansi.Strip(model.View()); !strings.Contains(xansi.Strip(model.pages[0]), "┊ Tú\n  hola") || !strings.Contains(view, "◆ ALICE") || !strings.Contains(view, "› ") {
+		t.Fatalf("faltan símbolos semánticos en la vista: %q", view)
+	}
+}
 
 func TestRenderMarkdownForNarrowViewport(t *testing.T) {
 	model := Model{markdownCache: make(map[string]string)}
@@ -80,7 +145,7 @@ func TestCompleteStreamingFlow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	model, err := New(database, provider.DeepSeek{APIKey: "test", BaseURL: server.URL})
+	model, err := New(database, provider.DeepSeek{APIKey: "test", BaseURL: server.URL}, provider.DeepSeekFlashModel, 0.7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +187,7 @@ func TestStreamErrorIsFriendlyAndLeavesChatUsable(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer database.Close()
-	model, err := New(database, provider.DeepSeek{APIKey: "test", BaseURL: server.URL})
+	model, err := New(database, provider.DeepSeek{APIKey: "test", BaseURL: server.URL}, provider.DeepSeekFlashModel, 0.7)
 	if err != nil {
 		t.Fatal(err)
 	}

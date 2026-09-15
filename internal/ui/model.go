@@ -15,6 +15,7 @@ import (
 	"github.com/charmbracelet/glamour/ansi"
 	"github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/lipgloss"
+	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/clipboard"
@@ -23,15 +24,17 @@ import (
 )
 
 var (
-	coral      = lipgloss.Color("#FF7A90")
-	lavender   = lipgloss.Color("#A995FF")
-	ink        = lipgloss.Color("#E8E6F0")
-	muted      = lipgloss.Color("#777184")
-	surface    = lipgloss.Color("#25222C")
-	userStyle  = lipgloss.NewStyle().Foreground(ink).Background(lipgloss.Color("#34303D")).Padding(0, 1).MarginTop(1)
-	aliceStyle = lipgloss.NewStyle().Foreground(ink).BorderLeft(true).BorderForeground(lavender).PaddingLeft(1).MarginTop(1)
-	logoStyle  = lipgloss.NewStyle().Bold(true).Foreground(coral)
-	mutedStyle = lipgloss.NewStyle().Foreground(muted)
+	coral            = lipgloss.Color("#FF7A90")
+	lavender         = lipgloss.Color("#A995FF")
+	ink              = lipgloss.Color("#E8E6F0")
+	muted            = lipgloss.Color("#777184")
+	surface          = lipgloss.Color("#25222C")
+	userMarkerStyle  = lipgloss.NewStyle().Foreground(lavender)
+	userLabelStyle   = lipgloss.NewStyle().Foreground(muted)
+	userContentStyle = lipgloss.NewStyle().Foreground(ink)
+	aliceStyle       = lipgloss.NewStyle().Foreground(ink).BorderLeft(true).BorderForeground(lavender).PaddingLeft(1).MarginTop(1)
+	logoStyle        = lipgloss.NewStyle().Bold(true).Foreground(coral)
+	mutedStyle       = lipgloss.NewStyle().Foreground(muted)
 )
 
 type streamMsg chat.Event
@@ -67,6 +70,8 @@ type Model struct {
 	messages         []chat.Message
 	viewport         viewport.Model
 	input            textarea.Model
+	requestModel     string
+	temperature      float64
 	width, height    int
 	stream           <-chan chat.Event
 	cancel           context.CancelFunc
@@ -93,7 +98,7 @@ type Model struct {
 	clipboardTimeout time.Duration
 }
 
-func New(database *store.Store, provider chat.Provider, usageStores ...*usage.Store) (Model, error) {
+func New(database *store.Store, provider chat.Provider, requestModel string, temperature float64, usageStores ...*usage.Store) (Model, error) {
 	var usageStore *usage.Store
 	if len(usageStores) > 0 {
 		usageStore = usageStores[0]
@@ -128,7 +133,7 @@ func New(database *store.Store, provider chat.Provider, usageStores ...*usage.St
 	input.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
 	input.Focus()
 	view := viewport.New(1, 1)
-	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string), usageStore: usageStore, usageRecords: usageRecords, clipboardWrite: clipboard.Write, clipboardTimeout: copyTimeout}
+	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, requestModel: requestModel, temperature: temperature, markdownCache: make(map[string]string), usageStore: usageStore, usageRecords: usageRecords, clipboardWrite: clipboard.Write, clipboardTimeout: copyTimeout}
 	model.refresh()
 	return model, nil
 }
@@ -316,7 +321,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.pendingUsage = nil
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	m.stream = m.provider.Stream(ctx, chat.Request{Model: "deepseek-chat", Messages: m.messages, Temperature: .7})
+	m.stream = m.provider.Stream(ctx, chat.Request{ConversationID: m.conversation.ID, Model: m.requestModel, Messages: m.messages, Temperature: m.temperature})
 	m.refresh()
 	m.goToPage(m.totalPages - 1)
 	return m, waitForEvent(m.stream)
@@ -710,7 +715,7 @@ func (m Model) placeColumn(column string) string {
 }
 
 func (m Model) conversationHeight() int {
-	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
+	header := m.chatHeader(m.viewport.Width)
 	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
 	status := m.status + "  " + page
 	headerLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(header))
@@ -729,7 +734,7 @@ func (m *Model) refresh() {
 	}
 	for _, message := range m.messages {
 		if message.Role == "user" {
-			body.WriteString(userStyle.Width(messageWidth).Render("Tú\n" + message.Content))
+			body.WriteString(renderUserMessage(message.Content, messageWidth))
 		} else {
 			body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.renderMarkdown(message.Content, markdownWidth)))
 		}
@@ -739,6 +744,18 @@ func (m *Model) refresh() {
 		body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.draft + " ▌"))
 	}
 	m.setPages(body.String())
+}
+
+func renderUserMessage(content string, width int) string {
+	contentWidth := max(1, width-2)
+	wrapped := xansi.Wrap(content, contentWidth, "")
+	contentLines := strings.Split(wrapped, "\n")
+	for index, line := range contentLines {
+		contentLines[index] = "  " + userContentStyle.Render(line)
+	}
+	indented := strings.Join(contentLines, "\n")
+	header := userMarkerStyle.Render("┊") + " " + userLabelStyle.Render("Tú")
+	return "\n" + header + "\n" + indented
 }
 
 func (m *Model) setPages(content string) {
@@ -856,7 +873,7 @@ func (m Model) View() string {
 	if m.screen == statsScreen {
 		return m.statsView()
 	}
-	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
+	header := m.chatHeader(m.viewport.Width)
 	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
 	main := lipgloss.NewStyle().Width(m.viewport.Width).Render(lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Width(m.viewport.Width).Render(header),

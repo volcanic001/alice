@@ -21,7 +21,7 @@ func testScreenModel(t *testing.T) Model {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { database.Close() })
-	model, err := New(database, provider.DeepSeek{APIKey: "test"})
+	model, err := New(database, provider.DeepSeek{APIKey: "test"}, provider.DeepSeekFlashModel, 0.7)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func testHistoryModel(t *testing.T, titles ...string) (Model, *store.Store) {
 		conversation.Title = title
 		conversations = append(conversations, conversation)
 	}
-	model, err := New(database, provider.DeepSeek{APIKey: "test"})
+	model, err := New(database, provider.DeepSeek{APIKey: "test"}, provider.DeepSeekFlashModel, 0.7)
 	if err != nil {
 		t.Fatal(err)
 	}

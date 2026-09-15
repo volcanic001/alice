@@ -3,6 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
+
+	"github.com/volcanic001/alice/internal/provider"
 )
 
 type Config struct {
@@ -29,7 +31,7 @@ func Load() (Config, error) {
 	}
 	return Config{
 		APIKey: os.Getenv("DEEPSEEK_API_KEY"), BaseURL: baseURL,
-		Model: "deepseek-chat", Temperature: 0.7,
+		Model: provider.DeepSeekFlashModel, Temperature: 0.7,
 		DataPath:  filepath.Join(directory, "alice.db"),
 		UsagePath: filepath.Join(directory, "usage.json"),
 	}, nil

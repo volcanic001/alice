@@ -76,7 +76,7 @@ func TestDeepSeekCapturesUsageFromFinalChunk(t *testing.T) {
 
 	var usage *chat.UsageRecord
 	var done bool
-	for event := range (DeepSeek{APIKey: "secreto", BaseURL: server.URL}).Stream(context.Background(), chat.Request{Model: "deepseek-chat"}) {
+	for event := range (DeepSeek{APIKey: "secreto", BaseURL: server.URL}).Stream(context.Background(), chat.Request{ConversationID: 42, Model: "deepseek-chat"}) {
 		if event.Err != nil {
 			t.Fatal(event.Err)
 		}
@@ -88,7 +88,7 @@ func TestDeepSeekCapturesUsageFromFinalChunk(t *testing.T) {
 	if !done || usage == nil {
 		t.Fatalf("uso no capturado: done=%v usage=%#v", done, usage)
 	}
-	if usage.Model != "deepseek-v4-pro" || usage.PromptTokens != 17 || usage.CompletionTokens != 9 || usage.TotalTokens != 26 || usage.PromptCacheHitTokens != 12 || usage.PromptCacheMissTokens != 5 {
+	if usage.ConversationID != 42 || usage.Model != "deepseek-v4-pro" || usage.PromptTokens != 17 || usage.CompletionTokens != 9 || usage.TotalTokens != 26 || usage.PromptCacheHitTokens != 12 || usage.PromptCacheMissTokens != 5 {
 		t.Fatalf("uso inesperado: %#v", usage)
 	}
 	if usage.RequestedAt.IsZero() || usage.RequestedAt.Location() != time.Local {

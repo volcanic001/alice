@@ -38,7 +38,7 @@ func testCommandModel(t *testing.T, usageStores ...*usage.Store) (Model, *record
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	provider := &recordingProvider{}
-	model, err := New(database, provider, usageStores...)
+	model, err := New(database, provider, "deepseek-flash", 0.7, usageStores...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,11 +115,11 @@ func TestFinalUsageChunkIsPropagatedAndPersisted(t *testing.T) {
 		t.Fatalf("UsageRecord no propagado: %v", model.usageRecords)
 	}
 	record := model.usageRecords[0]
-	if record.Model != "deepseek-flash" || record.PromptTokens != 17 || record.CompletionTokens != 9 || record.TotalTokens != 26 || record.PromptCacheHitTokens != 12 || record.PromptCacheMissTokens != 5 {
+	if record.ConversationID != model.conversation.ID || record.Model != "deepseek-flash" || record.PromptTokens != 17 || record.CompletionTokens != 9 || record.TotalTokens != 26 || record.PromptCacheHitTokens != 12 || record.PromptCacheMissTokens != 5 {
 		t.Fatalf("UsageRecord inesperado: %v", record)
 	}
 	persisted, err := usageStore.Load()
-	if err != nil || len(persisted) != 1 || persisted[0].Model != "deepseek-flash" || persisted[0].TotalTokens != 26 {
+	if err != nil || len(persisted) != 1 || persisted[0].ConversationID != model.conversation.ID || persisted[0].Model != "deepseek-flash" || persisted[0].TotalTokens != 26 {
 		t.Fatalf("UsageRecord no persistido: records=%v err=%v", persisted, err)
 	}
 }
@@ -210,7 +210,7 @@ func TestUnknownSlashCommandStaysLocal(t *testing.T) {
 func TestSlashInsideNormalTextUsesProvider(t *testing.T) {
 	model, provider := testCommandModel(t)
 	model = submitInput(t, model, "¿Qué es /etc en Linux?")
-	if len(provider.requests) != 1 || !model.busy || len(model.messages) != 1 || model.messages[0].Content != "¿Qué es /etc en Linux?" {
+	if len(provider.requests) != 1 || provider.requests[0].Model != "deepseek-flash" || provider.requests[0].Temperature != 0.7 || !model.busy || len(model.messages) != 1 || model.messages[0].Content != "¿Qué es /etc en Linux?" {
 		t.Fatalf("el texto normal no siguió el flujo del provider: requests=%d busy=%v mensajes=%#v", len(provider.requests), model.busy, model.messages)
 	}
 }

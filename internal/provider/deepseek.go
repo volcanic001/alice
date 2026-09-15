@@ -16,6 +16,11 @@ import (
 	"github.com/volcanic001/alice/internal/chat"
 )
 
+const (
+	DeepSeekFlashModel         = "deepseek-flash"
+	DeepSeekFlashContextWindow = 1_048_576
+)
+
 type ErrorKind string
 
 const (
@@ -176,12 +181,13 @@ type deepSeekStreamChunk struct {
 	} `json:"choices"`
 }
 
-func usageRecord(model string, usage *deepSeekUsage, requestedAt time.Time) *chat.UsageRecord {
+func usageRecord(conversationID int64, model string, usage *deepSeekUsage, requestedAt time.Time) *chat.UsageRecord {
 	if usage == nil {
 		return nil
 	}
 	return &chat.UsageRecord{
 		Model:                 model,
+		ConversationID:        conversationID,
 		PromptTokens:          usage.PromptTokens,
 		CompletionTokens:      usage.CompletionTokens,
 		TotalTokens:           usage.TotalTokens,
@@ -277,7 +283,7 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 			if json.Unmarshal([]byte(data), &chunk) != nil {
 				continue
 			}
-			if usage := usageRecord(chunk.Model, chunk.Usage, requestedAt); usage != nil {
+			if usage := usageRecord(request.ConversationID, chunk.Model, chunk.Usage, requestedAt); usage != nil {
 				timer.Stop()
 				out <- chat.Event{Usage: usage}
 			}

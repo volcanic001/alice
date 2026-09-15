@@ -23,7 +23,7 @@ func main() {
 		fail(err)
 	}
 	defer database.Close()
-	model, err := ui.New(database, provider.DeepSeek{APIKey: configuration.APIKey, BaseURL: configuration.BaseURL}, usage.New(configuration.UsagePath))
+	model, err := ui.New(database, provider.DeepSeek{APIKey: configuration.APIKey, BaseURL: configuration.BaseURL}, configuration.Model, configuration.Temperature, usage.New(configuration.UsagePath))
 	if err != nil {
 		fail(err)
 	}

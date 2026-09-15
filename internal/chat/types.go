@@ -19,13 +19,15 @@ type Conversation struct {
 }
 
 type Request struct {
-	Model       string
-	Messages    []Message
-	Temperature float64
+	ConversationID int64
+	Model          string
+	Messages       []Message
+	Temperature    float64
 }
 
 // UsageRecord is the token usage reported by a provider for one successful request.
 type UsageRecord struct {
+	ConversationID        int64 `json:"conversation_id,omitempty"`
 	Model                 string
 	PromptTokens          int
 	CompletionTokens      int
