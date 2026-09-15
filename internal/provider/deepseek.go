@@ -10,14 +10,16 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/volcanic001/alice/internal/chat"
 )
 
 type DeepSeek struct {
-	APIKey  string
-	BaseURL string
-	Client  *http.Client
+	APIKey            string
+	BaseURL           string
+	Client            *http.Client
+	FirstTokenTimeout time.Duration
 }
 
 func (d DeepSeek) Name() string { return "DeepSeek" }
@@ -30,6 +32,19 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 			out <- chat.Event{Err: errors.New("falta DEEPSEEK_API_KEY")}
 			return
 		}
+		timeout := d.FirstTokenTimeout
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		requestContext, cancelRequest := context.WithCancel(ctx)
+		defer cancelRequest()
+		timedOut := make(chan struct{})
+		timer := time.AfterFunc(timeout, func() {
+			close(timedOut)
+			cancelRequest()
+		})
+		defer timer.Stop()
+
 		messages := make([]map[string]string, 0, len(request.Messages))
 		for _, message := range request.Messages {
 			messages = append(messages, map[string]string{"role": message.Role, "content": message.Content})
@@ -46,7 +61,7 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 		if baseURL == "" {
 			baseURL = "https://api.deepseek.com"
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(payload))
+		req, err := http.NewRequestWithContext(requestContext, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(payload))
 		if err != nil {
 			out <- chat.Event{Err: err}
 			return
@@ -59,7 +74,12 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 		}
 		response, err := client.Do(req)
 		if err != nil {
-			out <- chat.Event{Err: err}
+			select {
+			case <-timedOut:
+				out <- chat.Event{Err: fmt.Errorf("DeepSeek no envió ningún token en %s", timeout)}
+			default:
+				out <- chat.Event{Err: err}
+			}
 			return
 		}
 		defer response.Body.Close()
@@ -88,8 +108,15 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 				} `json:"choices"`
 			}
 			if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+				timer.Stop()
 				out <- chat.Event{Text: chunk.Choices[0].Delta.Content}
 			}
+		}
+		select {
+		case <-timedOut:
+			out <- chat.Event{Err: fmt.Errorf("DeepSeek no envió ningún token en %s", timeout)}
+			return
+		default:
 		}
 		if err := scanner.Err(); err != nil {
 			out <- chat.Event{Err: err}

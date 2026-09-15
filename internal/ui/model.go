@@ -32,6 +32,24 @@ var (
 type streamMsg chat.Event
 type errMsg struct{ err error }
 
+type screen int
+
+const (
+	chatScreen screen = iota
+	historyScreen
+)
+
+const (
+	horizontalMargin = 2
+	maxColumnWidth   = 84
+	helpText         = "Enter enviar · Shift+Enter salto · Ctrl+N nuevo · Ctrl+H historial · PgUp/PgDn páginas · Inicio/Fin · Esc cancelar"
+)
+
+type columnLayout struct {
+	contentWidth int
+	leftMargin   int
+	rightMargin  int
+}
 type Model struct {
 	store         *store.Store
 	provider      chat.Provider
@@ -49,6 +67,11 @@ type Model struct {
 	markdown      *glamour.TermRenderer
 	markdownWidth int
 	markdownCache map[string]string
+	pages         []string
+	currentPage   int
+	totalPages    int
+	screen        screen
+	historyIndex  int
 }
 
 func New(database *store.Store, provider chat.Provider) (Model, error) {
@@ -78,7 +101,6 @@ func New(database *store.Store, provider chat.Provider) (Model, error) {
 	input.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
 	input.Focus()
 	view := viewport.New(1, 1)
-	view.MouseWheelEnabled = true
 	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string)}
 	model.refresh()
 	return model, nil
@@ -103,12 +125,23 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		m.width, m.height = message.Width, message.Height
 		m.resize()
 	case tea.KeyMsg:
-		switch message.String() {
-		case "ctrl+c":
+		key := message.String()
+		if key == "ctrl+c" {
 			if m.cancel != nil {
 				m.cancel()
 			}
 			return m, tea.Quit
+		}
+		if key == "ctrl+n" {
+			if !m.busy {
+				return m.newConversation()
+			}
+			return m, nil
+		}
+		if m.screen == historyScreen {
+			return m.updateHistory(key)
+		}
+		switch key {
 		case "esc":
 			if m.busy && m.cancel != nil {
 				m.cancel()
@@ -116,27 +149,25 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Respuesta cancelada"
 				return m, nil
 			}
-		case "ctrl+n":
-			if !m.busy {
-				conversation, err := m.store.CreateConversation()
-				if err != nil {
-					m.status = err.Error()
-					return m, nil
-				}
-				m.conversations = append([]chat.Conversation{conversation}, m.conversations...)
-				m.conversation, m.messages = conversation, nil
-				m.refresh()
-			}
+		case "ctrl+h":
+			m.screen = historyScreen
+			m.historyIndex = m.currentConversationIndex()
 			return m, nil
 		case "enter":
 			if !m.busy && strings.TrimSpace(m.input.Value()) != "" {
 				return m.send()
 			}
 		case "pgup":
-			m.viewport.HalfViewUp()
+			m.goToPage(m.currentPage - 1)
 			return m, nil
 		case "pgdown":
-			m.viewport.HalfViewDown()
+			m.goToPage(m.currentPage + 1)
+			return m, nil
+		case "home":
+			m.goToPage(0)
+			return m, nil
+		case "end":
+			m.goToPage(m.totalPages - 1)
 			return m, nil
 		case "alt+up":
 			return m.openRelative(-1)
@@ -154,7 +185,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if event.Text != "" {
 			m.draft += event.Text
 			m.refresh()
-			m.viewport.GotoBottom()
+			m.goToPage(m.totalPages - 1)
 		}
 		if event.Done {
 			m.busy = false
@@ -176,11 +207,13 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	var command tea.Cmd
-	m.viewport, command = m.viewport.Update(message)
-	commands = append(commands, command)
 	if !m.busy {
+		inputHeight := m.input.Height()
 		m.input, command = m.input.Update(message)
 		commands = append(commands, command)
+		if m.input.Height() != inputHeight {
+			m.resize()
+		}
 	}
 	return m, tea.Batch(commands...)
 }
@@ -200,19 +233,24 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.cancel = cancel
 	m.stream = m.provider.Stream(ctx, chat.Request{Model: "deepseek-chat", Messages: m.messages, Temperature: .7})
 	m.refresh()
-	m.viewport.GotoBottom()
+	m.goToPage(m.totalPages - 1)
 	return m, waitForEvent(m.stream)
 }
 
 func (m Model) openRelative(delta int) (tea.Model, tea.Cmd) {
-	index := 0
+	return m.openConversation(m.currentConversationIndex() + delta)
+}
+
+func (m Model) currentConversationIndex() int {
 	for i, conversation := range m.conversations {
 		if conversation.ID == m.conversation.ID {
-			index = i
-			break
+			return i
 		}
 	}
-	index += delta
+	return 0
+}
+
+func (m Model) openConversation(index int) (tea.Model, tea.Cmd) {
 	if index < 0 || index >= len(m.conversations) {
 		return m, nil
 	}
@@ -223,26 +261,87 @@ func (m Model) openRelative(delta int) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.messages = messages
+	m.screen = chatScreen
 	m.refresh()
-	m.viewport.GotoBottom()
+	m.goToPage(m.totalPages - 1)
+	return m, m.input.Focus()
+}
+
+func (m Model) newConversation() (tea.Model, tea.Cmd) {
+	conversation, err := m.store.CreateConversation()
+	if err != nil {
+		m.status = err.Error()
+		return m, nil
+	}
+	m.conversations = append([]chat.Conversation{conversation}, m.conversations...)
+	m.conversation, m.messages = conversation, nil
+	m.screen = chatScreen
+	m.refresh()
+	return m, m.input.Focus()
+}
+
+func (m Model) updateHistory(key string) (tea.Model, tea.Cmd) {
+	switch key {
+	case "ctrl+h", "esc":
+		m.screen = chatScreen
+		return m, m.input.Focus()
+	case "up":
+		if m.historyIndex > 0 {
+			m.historyIndex--
+		}
+	case "down":
+		if m.historyIndex < len(m.conversations)-1 {
+			m.historyIndex++
+		}
+	case "enter":
+		return m.openConversation(m.historyIndex)
+	}
 	return m, nil
 }
 
 func (m *Model) resize() {
-	footer := 7
-	sidebar := 0
-	if m.width >= 90 {
-		sidebar = min(28, m.width/3)
-	}
-	m.viewport.Width = max(20, m.width-sidebar-4)
-	m.viewport.Height = max(4, m.height-footer)
-	m.input.SetWidth(max(20, m.width-sidebar-4))
+	layout := m.columnLayout()
+	m.viewport.Width = layout.contentWidth
+	m.input.SetWidth(layout.contentWidth)
+	m.viewport.Height = m.conversationHeight()
 	m.refresh()
 }
 
+func (m Model) columnLayout() columnLayout {
+	contentWidth := min(m.width-horizontalMargin*2, maxColumnWidth)
+	if contentWidth < 1 {
+		contentWidth = 1
+	}
+	remaining := m.width - contentWidth
+	if remaining < 0 {
+		remaining = 0
+	}
+	leftMargin := remaining / 2
+	return columnLayout{
+		contentWidth: contentWidth,
+		leftMargin:   leftMargin,
+		rightMargin:  remaining - leftMargin,
+	}
+}
+
+func (m Model) placeColumn(column string) string {
+	indent := strings.Repeat(" ", m.columnLayout().leftMargin)
+	return indent + strings.ReplaceAll(column, "\n", "\n"+indent)
+}
+
+func (m Model) conversationHeight() int {
+	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
+	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
+	status := m.status + "  " + page
+	headerLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(header))
+	statusLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(status))
+	inputLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).BorderTop(true).Render(m.input.View()))
+	helpLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(helpText))
+	return max(4, m.height-headerLines-statusLines-inputLines-helpLines)
+}
+
 func (m *Model) refresh() {
-	width := max(20, m.viewport.Width-2)
-	messageWidth := max(10, width-4)
+	messageWidth := max(10, m.viewport.Width)
 	markdownWidth := max(10, messageWidth-2)
 	var body strings.Builder
 	if len(m.messages) == 0 && m.draft == "" {
@@ -259,7 +358,44 @@ func (m *Model) refresh() {
 	if m.draft != "" {
 		body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.draft + " ▌"))
 	}
-	m.viewport.SetContent(body.String())
+	m.setPages(body.String())
+}
+
+func (m *Model) setPages(content string) {
+	lines := strings.Split(content, "\n")
+	linesPerPage := max(1, m.viewport.Height)
+	m.pages = make([]string, 0, (len(lines)+linesPerPage-1)/linesPerPage)
+	for start := 0; start < len(lines); start += linesPerPage {
+		end := min(start+linesPerPage, len(lines))
+		m.pages = append(m.pages, strings.Join(lines[start:end], "\n"))
+	}
+	if len(m.pages) == 0 {
+		m.pages = []string{""}
+	}
+	m.totalPages = len(m.pages)
+	if m.currentPage >= m.totalPages {
+		m.currentPage = m.totalPages - 1
+	}
+	if m.currentPage < 0 {
+		m.currentPage = 0
+	}
+	m.showCurrentPage()
+}
+
+func (m *Model) goToPage(page int) {
+	if page < 0 || page >= m.totalPages || page == m.currentPage {
+		return
+	}
+	m.currentPage = page
+	m.showCurrentPage()
+}
+
+func (m *Model) showCurrentPage() {
+	if m.totalPages == 0 {
+		return
+	}
+	m.viewport.SetContent(m.pages[m.currentPage])
+	m.viewport.GotoTop()
 }
 
 func (m *Model) renderMarkdown(source string, width int) string {
@@ -331,35 +467,40 @@ func (m Model) View() string {
 	if m.width == 0 {
 		return "Iniciando Alice…"
 	}
-	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
-	main := lipgloss.JoinVertical(lipgloss.Left,
-		lipgloss.NewStyle().Width(m.viewport.Width).Padding(0, 1).Render(header),
-		m.viewport.View(),
-		lipgloss.NewStyle().Foreground(muted).Render(m.status),
-		lipgloss.NewStyle().BorderTop(true).BorderForeground(surface).Render(m.input.View()),
-		mutedStyle.Render("Enter enviar · Shift+Enter salto · Ctrl+N nuevo · PgUp/PgDn scroll · Esc cancelar"),
-	)
-	if m.width < 90 {
-		return main
+	if m.screen == historyScreen {
+		return m.historyView()
 	}
-	sideWidth := min(28, m.width/3)
-	var side strings.Builder
-	side.WriteString(logoStyle.Render("Conversaciones") + "\n\n")
-	for _, conversation := range m.conversations {
+	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
+	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
+	main := lipgloss.NewStyle().Width(m.viewport.Width).Render(lipgloss.JoinVertical(lipgloss.Left,
+		lipgloss.NewStyle().Width(m.viewport.Width).Render(header),
+		m.viewport.View(),
+		lipgloss.NewStyle().Foreground(muted).Render(m.status+"  "+page),
+		lipgloss.NewStyle().BorderTop(true).BorderForeground(surface).Render(m.input.View()),
+		mutedStyle.Render(helpText),
+	))
+	return m.placeColumn(main)
+}
+
+func (m Model) historyView() string {
+	var body strings.Builder
+	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("HISTORIAL") + "\n\n")
+	for index, conversation := range m.conversations {
 		prefix := "  "
 		style := mutedStyle
-		if conversation.ID == m.conversation.ID {
+		if index == m.historyIndex {
 			prefix = "● "
 			style = lipgloss.NewStyle().Foreground(lavender).Bold(true)
 		}
 		title := conversation.Title
-		if len([]rune(title)) > sideWidth-4 {
-			title = string([]rune(title)[:sideWidth-5]) + "…"
+		if len([]rune(title)) > m.viewport.Width-4 {
+			title = string([]rune(title)[:m.viewport.Width-5]) + "…"
 		}
-		side.WriteString(style.Render(prefix+title) + "\n")
+		body.WriteString(style.Render(prefix+title) + "\n")
 	}
-	sidebar := lipgloss.NewStyle().Width(sideWidth).Height(m.height - 1).BorderRight(true).BorderForeground(surface).Padding(1).Render(side.String())
-	return lipgloss.JoinHorizontal(lipgloss.Top, sidebar, main)
+	body.WriteString("\n" + mutedStyle.Render("↑/↓ seleccionar · Enter abrir · Esc volver"))
+	column := lipgloss.NewStyle().Width(m.viewport.Width).Render(body.String())
+	return m.placeColumn(column)
 }
 
 func min(a, b int) int {

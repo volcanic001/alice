@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/volcanic001/alice/internal/chat"
 )
@@ -36,5 +38,23 @@ func TestDeepSeekStream(t *testing.T) {
 	}
 	if received != "Hola mundo" || !done {
 		t.Fatalf("stream inesperado: texto=%q done=%v", received, done)
+	}
+}
+
+func TestDeepSeekTimesOutWaitingForFirstToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.WriteHeader(http.StatusOK)
+		fmt.Fprint(response, ": keep-alive\n\n")
+		response.(http.Flusher).Flush()
+		<-request.Context().Done()
+	}))
+	defer server.Close()
+
+	client := DeepSeek{APIKey: "secreto", BaseURL: server.URL, FirstTokenTimeout: 50 * time.Millisecond}
+	events := client.Stream(context.Background(), chat.Request{Model: "deepseek-chat"})
+	event := <-events
+	if event.Err == nil || !strings.Contains(event.Err.Error(), "no envió ningún token") {
+		t.Fatalf("se esperaba timeout del primer token, se recibió: %+v", event)
 	}
 }

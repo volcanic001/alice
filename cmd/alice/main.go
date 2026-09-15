@@ -26,7 +26,7 @@ func main() {
 	if err != nil {
 		fail(err)
 	}
-	program := tea.NewProgram(model, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fail(err)
 	}

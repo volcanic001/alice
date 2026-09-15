@@ -1,8 +1,15 @@
 package ui
 
 import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/volcanic001/alice/internal/provider"
+	"github.com/volcanic001/alice/internal/store"
 
 	xansi "github.com/charmbracelet/x/ansi"
 )
@@ -47,5 +54,55 @@ func TestRenderMarkdownCachesFinalMessagesByWidth(t *testing.T) {
 	model.renderMarkdown(source, 20)
 	if model.markdownWidth != 20 || len(model.markdownCache) != 1 {
 		t.Fatalf("la caché no se reconstruyó para el nuevo ancho: width=%d entries=%d", model.markdownWidth, len(model.markdownCache))
+	}
+}
+
+func TestCompleteStreamingFlow(t *testing.T) {
+	requestReached := false
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requestReached = true
+		response.Header().Set("Content-Type", "text/event-stream")
+		response.WriteHeader(http.StatusOK)
+		flusher := response.(http.Flusher)
+		for _, chunk := range []string{"**Hola", " mundo**"} {
+			fmt.Fprintf(response, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", chunk)
+			flusher.Flush()
+		}
+		fmt.Fprint(response, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer server.Close()
+
+	database, err := store.Open(filepath.Join(t.TempDir(), "alice.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	model, err := New(database, provider.DeepSeek{APIKey: "test", BaseURL: server.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	model.viewport.Width = 32
+	model.input.SetValue("hola!")
+
+	next, command := model.send()
+	current := next.(Model)
+	for step := 1; current.busy; step++ {
+		if command == nil {
+			t.Fatalf("paso %d: no se programó la siguiente lectura SSE", step)
+		}
+		message := command()
+		next, command = current.Update(message)
+		current = next.(Model)
+		t.Logf("paso %d: Bubble Tea recibió %T, draft=%q busy=%v siguiente=%v", step, message, current.draft, current.busy, command != nil)
+	}
+	if !requestReached {
+		t.Fatal("la request HTTP nunca llegó al servidor")
+	}
+	if current.status != "Listo" || len(current.messages) != 2 || current.messages[1].Content != "**Hola mundo**" {
+		t.Fatalf("finalización incorrecta: status=%q messages=%+v", current.status, current.messages)
+	}
+	if len(current.markdownCache) != 1 || strings.Contains(xansi.Strip(current.viewport.View()), "**") {
+		t.Fatalf("Glamour no renderizó la respuesta final: cache=%d view=%q", len(current.markdownCache), xansi.Strip(current.viewport.View()))
 	}
 }
