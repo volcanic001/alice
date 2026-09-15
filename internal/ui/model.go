@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -41,6 +40,7 @@ const (
 	chatScreen screen = iota
 	historyScreen
 	helpScreen
+	statsScreen
 )
 
 const (
@@ -68,7 +68,6 @@ type Model struct {
 	usageRecords  []chat.UsageRecord
 	pendingUsage  *chat.UsageRecord
 	usageStore    *usage.Store
-	localOutput   string
 	draft         string
 	busy          bool
 	status        string
@@ -172,6 +171,12 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			case "ctrl+h":
 				return m.showHistory()
+			}
+			return m, nil
+		}
+		if m.screen == statsScreen {
+			if key == "esc" {
+				return m.showChat()
 			}
 			return m, nil
 		}
@@ -295,7 +300,6 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.status = "Alice está pensando…"
 	m.draft = ""
-	m.localOutput = ""
 	m.pendingUsage = nil
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
@@ -309,7 +313,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 // input local. Text that does not start with a slash follows the provider path.
 func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 	switch content {
-	case "/help":
+	case "/help", "/ayuda":
 		m.input.Reset()
 		next, command := m.showHelp()
 		return next, command, true
@@ -337,10 +341,7 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 }
 
 func (m Model) showStats() (tea.Model, tea.Cmd) {
-	m.localOutput = renderUsageStats(m.usageRecords, time.Now())
-	m.status = "Listo"
-	m.currentPage = 0
-	m.refresh()
+	m.screen = statsScreen
 	return m, nil
 }
 
@@ -377,7 +378,6 @@ func (m Model) openConversation(index int) (tea.Model, tea.Cmd) {
 	if index < 0 || index >= len(m.conversations) {
 		return m, nil
 	}
-	m.localOutput = ""
 	m.conversation = m.conversations[index]
 	messages, err := m.store.Messages(m.conversation.ID)
 	if err != nil {
@@ -401,7 +401,6 @@ func (m Model) newConversation() (tea.Model, tea.Cmd) {
 		m.status = err.Error()
 		return m, nil
 	}
-	m.localOutput = ""
 	m.conversations = append([]chat.Conversation{conversation}, m.conversations...)
 	m.conversation, m.messages = conversation, nil
 	m.screen = chatScreen
@@ -685,13 +684,8 @@ func (m *Model) refresh() {
 	messageWidth := max(10, m.viewport.Width)
 	markdownWidth := max(10, messageWidth-2)
 	var body strings.Builder
-	if len(m.messages) == 0 && m.draft == "" && m.localOutput == "" {
+	if len(m.messages) == 0 && m.draft == "" {
 		body.WriteString("\n" + logoStyle.Render("Hola, soy Alice.") + "\n" + mutedStyle.Render("¿En qué puedo ayudarte hoy?"))
-	}
-	if m.localOutput != "" {
-		body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.localOutput))
-		m.setPages(body.String())
-		return
 	}
 	for _, message := range m.messages {
 		if message.Role == "user" {
@@ -819,6 +813,9 @@ func (m Model) View() string {
 	if m.screen == helpScreen {
 		return m.helpView()
 	}
+	if m.screen == statsScreen {
+		return m.statsView()
+	}
 	header := logoStyle.Render("◆ ALICE") + "  " + mutedStyle.Render(m.conversation.Title)
 	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
 	main := lipgloss.NewStyle().Width(m.viewport.Width).Render(lipgloss.JoinVertical(lipgloss.Left,
@@ -835,7 +832,7 @@ func (m Model) helpView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
 	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
-	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n\n")
+	body.WriteString("/help        Mostrar ayuda\n/ayuda       Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")

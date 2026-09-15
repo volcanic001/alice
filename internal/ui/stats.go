@@ -6,52 +6,122 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+
 	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/usage"
 )
 
-const unavailableCost = "Unavailable (pricing incomplete)"
+const (
+	unavailableCost        = "Unavailable"
+	statsTwoColumnMinWidth = 72
+	statsColumnGap         = 4
+)
 
-func renderUsageStats(records []chat.UsageRecord, now time.Time) string {
-	tokenSummaries := usage.SummarizeAt(records, now)
-	costSummaries, costErr := (usage.CostCalculator{Catalog: usage.DeepSeekPricingCatalog()}).SummarizeAt(records, now)
-	periods := []struct {
-		name   string
-		tokens usage.Summary
-		costs  usage.CostSummary
-	}{
-		{"Today", tokenSummaries.Today, costSummaries.Today},
-		{"Last 7 days", tokenSummaries.Last7Days, costSummaries.Last7Days},
-		{"Current month", tokenSummaries.CurrentMonth, costSummaries.CurrentMonth},
-		{"Historical", tokenSummaries.Historical, costSummaries.Historical},
-	}
-
-	var output strings.Builder
-	output.WriteString("API Usage\n")
-	for _, period := range periods {
-		output.WriteString("\n" + period.name + "\n")
-		writeUsagePeriod(&output, period.tokens, period.costs, costErr == nil)
-	}
-	if costErr != nil {
-		output.WriteString("\nCost unavailable: ")
-		output.WriteString(costErr.Error())
-		output.WriteByte('\n')
-	}
-	return strings.TrimRight(output.String(), "\n")
+type statsPeriod struct {
+	name   string
+	tokens usage.Summary
+	cost   usage.CostSummary
 }
 
-func writeUsagePeriod(output *strings.Builder, tokens usage.Summary, costs usage.CostSummary, costAvailable bool) {
-	fmt.Fprintf(output, "%-16s%s\n", "Requests", formatCount(tokens.Requests))
-	fmt.Fprintf(output, "%-16s%s\n", "Tokens", formatCount(tokens.TotalTokens))
-	fmt.Fprintf(output, "%-16s%s\n", "Prompt", formatCount(tokens.PromptTokens))
-	fmt.Fprintf(output, "%-16s%s\n", "Completion", formatCount(tokens.CompletionTokens))
-	fmt.Fprintf(output, "%-16s%s\n", "Cache hit", formatCount(tokens.PromptCacheHitTokens))
-	fmt.Fprintf(output, "%-16s%s\n", "Cache miss", formatCount(tokens.PromptCacheMissTokens))
-	if costAvailable {
-		fmt.Fprintf(output, "%-16s%s\n", "Cost", formatUSD(costs.Cost.TotalUSD))
-	} else {
-		fmt.Fprintf(output, "%-16s%s\n", "Cost", unavailableCost)
+type statsViewData struct {
+	periods       []statsPeriod
+	costAvailable bool
+	costError     error
+	empty         bool
+}
+
+func buildStatsViewData(records []chat.UsageRecord, now time.Time) statsViewData {
+	tokenSummaries := usage.SummarizeAt(records, now)
+	costSummaries, costErr := (usage.CostCalculator{Catalog: usage.DeepSeekPricingCatalog()}).SummarizeAt(records, now)
+	return statsViewData{
+		periods: []statsPeriod{
+			{"TODAY", tokenSummaries.Today, costSummaries.Today},
+			{"LAST 7 DAYS", tokenSummaries.Last7Days, costSummaries.Last7Days},
+			{"CURRENT MONTH", tokenSummaries.CurrentMonth, costSummaries.CurrentMonth},
+			{"HISTORICAL", tokenSummaries.Historical, costSummaries.Historical},
+		},
+		costAvailable: costErr == nil,
+		costError:     costErr,
+		empty:         len(records) == 0,
 	}
+}
+
+func (m Model) statsView() string {
+	width := m.columnLayout().contentWidth
+	data := buildStatsViewData(m.usageRecords, time.Now())
+	var body strings.Builder
+	body.WriteString(logoStyle.Render("◆ API Usage"))
+	body.WriteString("\n\n")
+	if data.empty {
+		body.WriteString(mutedStyle.Render("No API usage recorded yet."))
+	} else if width >= statsTwoColumnMinWidth {
+		body.WriteString(renderWideStats(data, width))
+	} else {
+		body.WriteString(renderNarrowStats(data, width))
+	}
+	if data.costError != nil {
+		body.WriteString("\n\n")
+		body.WriteString(mutedStyle.Render("Pricing incomplete: costs are unavailable."))
+	}
+	body.WriteString("\n\n")
+	body.WriteString(mutedStyle.Render("Esc volver"))
+	column := lipgloss.NewStyle().Width(width).Render(body.String())
+	return m.placeColumn(column)
+}
+
+func renderNarrowStats(data statsViewData, width int) string {
+	blocks := make([]string, 0, len(data.periods))
+	for index, period := range data.periods {
+		blocks = append(blocks, renderStatsPeriod(period, width, index == 0, data.costAvailable))
+	}
+	return strings.Join(blocks, "\n\n")
+}
+
+func renderWideStats(data statsViewData, width int) string {
+	columnWidth := (width - statsColumnGap) / 2
+	gap := strings.Repeat(" ", statsColumnGap)
+	blocks := make([]string, len(data.periods))
+	for index, period := range data.periods {
+		block := renderStatsPeriod(period, columnWidth, index == 0, data.costAvailable)
+		blocks[index] = lipgloss.NewStyle().Width(columnWidth).Render(block)
+	}
+	firstRow := lipgloss.JoinHorizontal(lipgloss.Top, blocks[0], gap, blocks[1])
+	secondRow := lipgloss.JoinHorizontal(lipgloss.Top, blocks[2], gap, blocks[3])
+	return lipgloss.JoinVertical(lipgloss.Left, firstRow, "", secondRow)
+}
+
+func renderStatsPeriod(period statsPeriod, width int, details, costAvailable bool) string {
+	cost := unavailableCost
+	if costAvailable {
+		cost = formatUSD(period.cost.Cost.TotalUSD)
+	}
+	rows := []string{
+		lipgloss.NewStyle().Foreground(lavender).Bold(true).Render(period.name),
+		statRow("Cost", cost, width, true),
+		statRow("Tokens", formatCount(period.tokens.TotalTokens), width, true),
+		statRow("Requests", formatCount(period.tokens.Requests), width, true),
+	}
+	if details {
+		rows = append(rows, "",
+			statRow("Prompt", formatCount(period.tokens.PromptTokens), width, false),
+			statRow("Completion", formatCount(period.tokens.CompletionTokens), width, false),
+			statRow("Cache hit", formatCount(period.tokens.PromptCacheHitTokens), width, false),
+			statRow("Cache miss", formatCount(period.tokens.PromptCacheMissTokens), width, false),
+		)
+	}
+	return strings.Join(rows, "\n")
+}
+
+func statRow(label, value string, width int, primary bool) string {
+	labelText := mutedStyle.Render(label)
+	valueStyle := lipgloss.NewStyle().Foreground(ink).Bold(primary)
+	valueText := valueStyle.Render(value)
+	gap := width - lipgloss.Width(labelText) - lipgloss.Width(valueText)
+	if gap < 1 {
+		return labelText + "\n" + lipgloss.NewStyle().Width(width).Align(lipgloss.Right).Render(valueText)
+	}
+	return labelText + strings.Repeat(" ", gap) + valueText
 }
 
 func formatCount(value int) string {
@@ -72,5 +142,5 @@ func formatUSD(value float64) string {
 	for len(formatted)-decimal-1 > 6 && strings.HasSuffix(formatted, "0") {
 		formatted = strings.TrimSuffix(formatted, "0")
 	}
-	return "$" + formatted
+	return fmt.Sprintf("$%s", formatted)
 }
