@@ -2,6 +2,7 @@ package provider
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -48,6 +49,50 @@ func TestDeepSeekStream(t *testing.T) {
 	}
 	if received != "Hola mundo" || !done {
 		t.Fatalf("stream inesperado: texto=%q done=%v", received, done)
+	}
+}
+
+func TestDeepSeekCapturesUsageFromFinalChunk(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		var payload struct {
+			StreamOptions struct {
+				IncludeUsage bool `json:"include_usage"`
+			} `json:"stream_options"`
+		}
+		if err := json.NewDecoder(request.Body).Decode(&payload); err != nil {
+			t.Fatal(err)
+		}
+		if !payload.StreamOptions.IncludeUsage {
+			t.Fatal("el cliente no solicitó usage en streaming")
+		}
+		response.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(response, `data: {"model":"deepseek-chat","choices":[{"delta":{"content":"Hola"}}]}`)
+		fmt.Fprintln(response)
+		fmt.Fprintln(response, `data: {"model":"deepseek-v4-pro","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":17,"completion_tokens":9,"total_tokens":26,"prompt_cache_hit_tokens":12,"prompt_cache_miss_tokens":5}}`)
+		fmt.Fprintln(response)
+		fmt.Fprintln(response, "data: [DONE]")
+	}))
+	defer server.Close()
+
+	var usage *chat.UsageRecord
+	var done bool
+	for event := range (DeepSeek{APIKey: "secreto", BaseURL: server.URL}).Stream(context.Background(), chat.Request{Model: "deepseek-chat"}) {
+		if event.Err != nil {
+			t.Fatal(event.Err)
+		}
+		if event.Usage != nil {
+			usage = event.Usage
+		}
+		done = done || event.Done
+	}
+	if !done || usage == nil {
+		t.Fatalf("uso no capturado: done=%v usage=%#v", done, usage)
+	}
+	if usage.Model != "deepseek-v4-pro" || usage.PromptTokens != 17 || usage.CompletionTokens != 9 || usage.TotalTokens != 26 || usage.PromptCacheHitTokens != 12 || usage.PromptCacheMissTokens != 5 {
+		t.Fatalf("uso inesperado: %#v", usage)
+	}
+	if usage.RequestedAt.IsZero() || usage.RequestedAt.Location() != time.Local {
+		t.Fatalf("timestamp local inesperado: %v", usage.RequestedAt)
 	}
 }
 

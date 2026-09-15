@@ -63,6 +63,8 @@ type Model struct {
 	width, height int
 	stream        <-chan chat.Event
 	cancel        context.CancelFunc
+	usageRecords  []chat.UsageRecord
+	pendingUsage  *chat.UsageRecord
 	draft         string
 	busy          bool
 	status        string
@@ -206,6 +208,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if event.Err != nil {
 			m.busy = false
 			m.cancel = nil
+			m.pendingUsage = nil
 			if errors.Is(event.Err, context.Canceled) {
 				m.status = "Respuesta cancelada"
 			} else {
@@ -218,6 +221,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.refresh()
 			m.goToPage(m.totalPages - 1)
 		}
+		if event.Usage != nil {
+			m.pendingUsage = event.Usage
+		}
 		if event.Done {
 			m.busy = false
 			m.cancel = nil
@@ -226,6 +232,10 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 					m.status = err.Error()
 				}
 				m.messages = append(m.messages, chat.Message{ConversationID: m.conversation.ID, Role: "assistant", Content: m.draft})
+			}
+			if m.pendingUsage != nil {
+				m.usageRecords = append(m.usageRecords, *m.pendingUsage)
+				m.pendingUsage = nil
 			}
 			m.draft = ""
 			m.status = "Listo"
@@ -263,6 +273,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.busy = true
 	m.status = "Alice está pensando…"
 	m.draft = ""
+	m.pendingUsage = nil
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
 	m.stream = m.provider.Stream(ctx, chat.Request{Model: "deepseek-chat", Messages: m.messages, Temperature: .7})

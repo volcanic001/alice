@@ -1,6 +1,9 @@
 package chat
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 type Message struct {
 	ID             int64
@@ -21,10 +24,23 @@ type Request struct {
 	Temperature float64
 }
 
+// UsageRecord is the token usage reported by a provider for one successful request.
+// It intentionally lives in memory only; storage and presentation are future work.
+type UsageRecord struct {
+	Model                 string
+	PromptTokens          int
+	CompletionTokens      int
+	TotalTokens           int
+	PromptCacheHitTokens  int
+	PromptCacheMissTokens int
+	RequestedAt           time.Time
+}
+
 type Event struct {
-	Text string
-	Err  error
-	Done bool
+	Text  string
+	Usage *UsageRecord
+	Err   error
+	Done  bool
 }
 
 type Provider interface {

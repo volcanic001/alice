@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	xansi "github.com/charmbracelet/x/ansi"
@@ -45,6 +46,21 @@ func submitInput(t *testing.T, model Model, value string) Model {
 	model.input.SetValue(value)
 	next, _ := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	return next.(Model)
+}
+
+func TestUsageIsKeptOnlyAfterSuccessfulStream(t *testing.T) {
+	model, _ := testCommandModel(t)
+	usage := &chat.UsageRecord{Model: "deepseek-chat", TotalTokens: 3, RequestedAt: time.Now()}
+	next, _ := model.Update(streamMsg(chat.Event{Usage: usage}))
+	model = next.(Model)
+	if len(model.usageRecords) != 0 || model.pendingUsage == nil {
+		t.Fatalf("el uso se guardó antes de finalizar: records=%#v pending=%#v", model.usageRecords, model.pendingUsage)
+	}
+	next, _ = model.Update(streamMsg(chat.Event{Done: true}))
+	model = next.(Model)
+	if len(model.usageRecords) != 1 || model.usageRecords[0] != *usage || model.pendingUsage != nil {
+		t.Fatalf("uso final inesperado: records=%#v pending=%#v", model.usageRecords, model.pendingUsage)
+	}
 }
 
 func TestFooterIsCompactSingleLine(t *testing.T) {

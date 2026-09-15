@@ -158,6 +158,39 @@ type DeepSeek struct {
 
 func (d DeepSeek) Name() string { return "DeepSeek" }
 
+type deepSeekUsage struct {
+	PromptTokens          int `json:"prompt_tokens"`
+	CompletionTokens      int `json:"completion_tokens"`
+	TotalTokens           int `json:"total_tokens"`
+	PromptCacheHitTokens  int `json:"prompt_cache_hit_tokens"`
+	PromptCacheMissTokens int `json:"prompt_cache_miss_tokens"`
+}
+
+type deepSeekStreamChunk struct {
+	Model   string         `json:"model"`
+	Usage   *deepSeekUsage `json:"usage"`
+	Choices []struct {
+		Delta struct {
+			Content string `json:"content"`
+		} `json:"delta"`
+	} `json:"choices"`
+}
+
+func usageRecord(model string, usage *deepSeekUsage, requestedAt time.Time) *chat.UsageRecord {
+	if usage == nil {
+		return nil
+	}
+	return &chat.UsageRecord{
+		Model:                 model,
+		PromptTokens:          usage.PromptTokens,
+		CompletionTokens:      usage.CompletionTokens,
+		TotalTokens:           usage.TotalTokens,
+		PromptCacheHitTokens:  usage.PromptCacheHitTokens,
+		PromptCacheMissTokens: usage.PromptCacheMissTokens,
+		RequestedAt:           requestedAt,
+	}
+}
+
 func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.Event {
 	out := make(chan chat.Event)
 	go func() {
@@ -186,6 +219,7 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 		payload, err := json.Marshal(map[string]any{
 			"model": request.Model, "messages": messages,
 			"temperature": request.Temperature, "stream": true,
+			"stream_options": map[string]bool{"include_usage": true},
 		})
 		if err != nil {
 			out <- chat.Event{Err: classifyError(err)}
@@ -206,6 +240,7 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 		if client == nil {
 			client = http.DefaultClient
 		}
+		requestedAt := time.Now()
 		response, err := client.Do(req)
 		if err != nil {
 			select {
@@ -238,14 +273,15 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 				out <- chat.Event{Err: streamError}
 				return
 			}
-			var chunk struct {
-				Choices []struct {
-					Delta struct {
-						Content string `json:"content"`
-					} `json:"delta"`
-				} `json:"choices"`
+			var chunk deepSeekStreamChunk
+			if json.Unmarshal([]byte(data), &chunk) != nil {
+				continue
 			}
-			if json.Unmarshal([]byte(data), &chunk) == nil && len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
+			if usage := usageRecord(chunk.Model, chunk.Usage, requestedAt); usage != nil {
+				timer.Stop()
+				out <- chat.Event{Usage: usage}
+			}
+			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
 				timer.Stop()
 				out <- chat.Event{Text: chunk.Choices[0].Delta.Content}
 			}
