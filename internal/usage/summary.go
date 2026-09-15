@@ -36,36 +36,54 @@ func SummarizeAt(records []chat.UsageRecord, now time.Time) Summaries {
 
 // summarizeIn exists to keep calendar-boundary tests independent of the host timezone.
 func summarizeIn(records []chat.UsageRecord, now time.Time, location *time.Location) Summaries {
-	localNow := now.In(location)
-	todayStart := startOfDay(localNow)
-	tomorrowStart := todayStart.AddDate(0, 0, 1)
-	sevenDayStart := todayStart.AddDate(0, 0, -6)
-	monthStart := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
-	nextMonthStart := monthStart.AddDate(0, 1, 0)
+	periods := calendarPeriods(now, location)
 
 	var summaries Summaries
 	for _, record := range records {
 		add(&summaries.Historical, record)
 		timestamp := record.RequestedAt.In(location)
-		if inRange(timestamp, todayStart, tomorrowStart) {
+		if periods.today.contains(timestamp) {
 			add(&summaries.Today, record)
 		}
-		if inRange(timestamp, sevenDayStart, tomorrowStart) {
+		if periods.last7Days.contains(timestamp) {
 			add(&summaries.Last7Days, record)
 		}
-		if inRange(timestamp, monthStart, nextMonthStart) {
+		if periods.currentMonth.contains(timestamp) {
 			add(&summaries.CurrentMonth, record)
 		}
 	}
 	return summaries
 }
 
-func startOfDay(timestamp time.Time) time.Time {
-	return time.Date(timestamp.Year(), timestamp.Month(), timestamp.Day(), 0, 0, 0, 0, timestamp.Location())
+type timeRange struct {
+	start time.Time
+	end   time.Time
 }
 
-func inRange(timestamp, start, end time.Time) bool {
-	return !timestamp.Before(start) && timestamp.Before(end)
+func (r timeRange) contains(timestamp time.Time) bool {
+	return !timestamp.Before(r.start) && timestamp.Before(r.end)
+}
+
+type calendarPeriodRanges struct {
+	today        timeRange
+	last7Days    timeRange
+	currentMonth timeRange
+}
+
+func calendarPeriods(now time.Time, location *time.Location) calendarPeriodRanges {
+	localNow := now.In(location)
+	todayStart := startOfDay(localNow)
+	tomorrowStart := todayStart.AddDate(0, 0, 1)
+	monthStart := time.Date(localNow.Year(), localNow.Month(), 1, 0, 0, 0, 0, location)
+	return calendarPeriodRanges{
+		today:        timeRange{start: todayStart, end: tomorrowStart},
+		last7Days:    timeRange{start: todayStart.AddDate(0, 0, -6), end: tomorrowStart},
+		currentMonth: timeRange{start: monthStart, end: monthStart.AddDate(0, 1, 0)},
+	}
+}
+
+func startOfDay(timestamp time.Time) time.Time {
+	return time.Date(timestamp.Year(), timestamp.Month(), timestamp.Day(), 0, 0, 0, 0, timestamp.Location())
 }
 
 func add(summary *Summary, record chat.UsageRecord) {
