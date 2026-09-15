@@ -16,6 +16,7 @@ import (
 
 	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/store"
+	"github.com/volcanic001/alice/internal/usage"
 )
 
 var (
@@ -65,6 +66,7 @@ type Model struct {
 	cancel        context.CancelFunc
 	usageRecords  []chat.UsageRecord
 	pendingUsage  *chat.UsageRecord
+	usageStore    *usage.Store
 	draft         string
 	busy          bool
 	status        string
@@ -83,7 +85,11 @@ type Model struct {
 	searchInput   textarea.Model
 }
 
-func New(database *store.Store, provider chat.Provider) (Model, error) {
+func New(database *store.Store, provider chat.Provider, usageStores ...*usage.Store) (Model, error) {
+	var usageStore *usage.Store
+	if len(usageStores) > 0 {
+		usageStore = usageStores[0]
+	}
 	conversations, err := database.Conversations()
 	if err != nil {
 		return Model{}, err
@@ -99,6 +105,10 @@ func New(database *store.Store, provider chat.Provider) (Model, error) {
 	if err != nil {
 		return Model{}, err
 	}
+	var usageRecords []chat.UsageRecord
+	if usageStore != nil {
+		usageRecords, _ = usageStore.Load()
+	}
 	input := textarea.New()
 	input.Placeholder = "Escribe un mensaje…"
 	input.Prompt = "› "
@@ -110,7 +120,7 @@ func New(database *store.Store, provider chat.Provider) (Model, error) {
 	input.KeyMap.InsertNewline.SetKeys("shift+enter", "ctrl+j")
 	input.Focus()
 	view := viewport.New(1, 1)
-	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string)}
+	model := Model{store: database, provider: provider, conversations: conversations, conversation: conversations[0], messages: messages, viewport: view, input: input, markdownCache: make(map[string]string), usageStore: usageStore, usageRecords: usageRecords}
 	model.refresh()
 	return model, nil
 }
@@ -227,6 +237,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if event.Done {
 			m.busy = false
 			m.cancel = nil
+			usageSaved := true
 			if m.draft != "" {
 				if err := m.store.AddMessage(m.conversation.ID, "assistant", m.draft); err != nil {
 					m.status = err.Error()
@@ -234,11 +245,20 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.messages = append(m.messages, chat.Message{ConversationID: m.conversation.ID, Role: "assistant", Content: m.draft})
 			}
 			if m.pendingUsage != nil {
-				m.usageRecords = append(m.usageRecords, *m.pendingUsage)
+				record := *m.pendingUsage
+				m.usageRecords = append(m.usageRecords, record)
 				m.pendingUsage = nil
+				if m.usageStore != nil {
+					if err := m.usageStore.Append(record); err != nil {
+						usageSaved = false
+						m.status = err.Error()
+					}
+				}
 			}
 			m.draft = ""
-			m.status = "Listo"
+			if usageSaved {
+				m.status = "Listo"
+			}
 			m.refresh()
 			return m, nil
 		}

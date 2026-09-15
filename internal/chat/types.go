@@ -25,7 +25,6 @@ type Request struct {
 }
 
 // UsageRecord is the token usage reported by a provider for one successful request.
-// It intentionally lives in memory only; storage and presentation are future work.
 type UsageRecord struct {
 	Model                 string
 	PromptTokens          int

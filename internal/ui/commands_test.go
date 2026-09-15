@@ -2,6 +2,9 @@ package ui
 
 import (
 	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,7 +14,9 @@ import (
 	xansi "github.com/charmbracelet/x/ansi"
 
 	"github.com/volcanic001/alice/internal/chat"
+	"github.com/volcanic001/alice/internal/provider"
 	"github.com/volcanic001/alice/internal/store"
+	"github.com/volcanic001/alice/internal/usage"
 )
 
 type recordingProvider struct {
@@ -25,7 +30,7 @@ func (p *recordingProvider) Stream(_ context.Context, request chat.Request) <-ch
 	return make(chan chat.Event)
 }
 
-func testCommandModel(t *testing.T) (Model, *recordingProvider) {
+func testCommandModel(t *testing.T, usageStores ...*usage.Store) (Model, *recordingProvider) {
 	t.Helper()
 	database, err := store.Open(filepath.Join(t.TempDir(), "alice.db"))
 	if err != nil {
@@ -33,7 +38,7 @@ func testCommandModel(t *testing.T) (Model, *recordingProvider) {
 	}
 	t.Cleanup(func() { _ = database.Close() })
 	provider := &recordingProvider{}
-	model, err := New(database, provider)
+	model, err := New(database, provider, usageStores...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +54,8 @@ func submitInput(t *testing.T, model Model, value string) Model {
 }
 
 func TestUsageIsKeptOnlyAfterSuccessfulStream(t *testing.T) {
-	model, _ := testCommandModel(t)
+	usageStore := usage.New(filepath.Join(t.TempDir(), "usage.json"))
+	model, _ := testCommandModel(t, usageStore)
 	usage := &chat.UsageRecord{Model: "deepseek-chat", TotalTokens: 3, RequestedAt: time.Now()}
 	next, _ := model.Update(streamMsg(chat.Event{Usage: usage}))
 	model = next.(Model)
@@ -60,6 +66,61 @@ func TestUsageIsKeptOnlyAfterSuccessfulStream(t *testing.T) {
 	model = next.(Model)
 	if len(model.usageRecords) != 1 || model.usageRecords[0] != *usage || model.pendingUsage != nil {
 		t.Fatalf("uso final inesperado: records=%#v pending=%#v", model.usageRecords, model.pendingUsage)
+	}
+	persisted, err := usageStore.Load()
+	if err != nil || len(persisted) != 1 || persisted[0].Model != usage.Model || !persisted[0].RequestedAt.Equal(usage.RequestedAt) {
+		t.Fatalf("uso no persistido: records=%#v err=%v", persisted, err)
+	}
+}
+
+func TestNewLoadsPersistedUsage(t *testing.T) {
+	usageStore := usage.New(filepath.Join(t.TempDir(), "usage.json"))
+	want := chat.UsageRecord{Model: "deepseek-chat", TotalTokens: 3, RequestedAt: time.Now()}
+	if err := usageStore.Append(want); err != nil {
+		t.Fatal(err)
+	}
+	model, _ := testCommandModel(t, usageStore)
+	if len(model.usageRecords) != 1 || model.usageRecords[0].Model != want.Model || model.usageRecords[0].TotalTokens != want.TotalTokens || !model.usageRecords[0].RequestedAt.Equal(want.RequestedAt) {
+		t.Fatalf("uso no restaurado: %#v", model.usageRecords)
+	}
+}
+
+func TestFinalUsageChunkIsPropagatedAndPersisted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprintln(response, `data: {"model":"deepseek-chat","choices":[{"delta":{"content":"Hola"}}],"usage":null}`)
+		fmt.Fprintln(response)
+		fmt.Fprintln(response, `data: {"model":"deepseek-chat","choices":[{"delta":{"content":" mundo"}}],"usage":null}`)
+		fmt.Fprintln(response)
+		fmt.Fprintln(response, `data:{"model":"deepseek-flash","choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":17,"completion_tokens":9,"total_tokens":26,"prompt_cache_hit_tokens":12,"prompt_cache_miss_tokens":5}}`)
+		fmt.Fprintln(response)
+		fmt.Fprintln(response, "data:[DONE]")
+	}))
+	defer server.Close()
+
+	usageStore := usage.New(filepath.Join(t.TempDir(), "usage.json"))
+	model, _ := testCommandModel(t, usageStore)
+	model.provider = provider.DeepSeek{APIKey: "secreto", BaseURL: server.URL}
+	model.input.SetValue("saluda")
+	next, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	model = next.(Model)
+	for command != nil {
+		next, command = model.Update(command())
+		model = next.(Model)
+	}
+	if model.busy {
+		t.Fatal("el stream no terminó")
+	}
+	if len(model.usageRecords) != 1 {
+		t.Fatalf("UsageRecord no propagado: %v", model.usageRecords)
+	}
+	record := model.usageRecords[0]
+	if record.Model != "deepseek-flash" || record.PromptTokens != 17 || record.CompletionTokens != 9 || record.TotalTokens != 26 || record.PromptCacheHitTokens != 12 || record.PromptCacheMissTokens != 5 {
+		t.Fatalf("UsageRecord inesperado: %v", record)
+	}
+	persisted, err := usageStore.Load()
+	if err != nil || len(persisted) != 1 || persisted[0].Model != "deepseek-flash" || persisted[0].TotalTokens != 26 {
+		t.Fatalf("UsageRecord no persistido: records=%v err=%v", persisted, err)
 	}
 }
 

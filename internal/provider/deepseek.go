@@ -261,10 +261,10 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
 		for scanner.Scan() {
 			line := strings.TrimSpace(scanner.Text())
-			if !strings.HasPrefix(line, "data: ") {
+			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
-			data := strings.TrimPrefix(line, "data: ")
+			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if data == "[DONE]" {
 				out <- chat.Event{Done: true}
 				return

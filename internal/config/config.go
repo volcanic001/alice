@@ -11,6 +11,7 @@ type Config struct {
 	Model       string
 	Temperature float64
 	DataPath    string
+	UsagePath   string
 }
 
 func Load() (Config, error) {
@@ -29,6 +30,7 @@ func Load() (Config, error) {
 	return Config{
 		APIKey: os.Getenv("DEEPSEEK_API_KEY"), BaseURL: baseURL,
 		Model: "deepseek-chat", Temperature: 0.7,
-		DataPath: filepath.Join(directory, "alice.db"),
+		DataPath:  filepath.Join(directory, "alice.db"),
+		UsagePath: filepath.Join(directory, "usage.json"),
 	}, nil
 }
