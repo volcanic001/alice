@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"runtime"
 	"strings"
 	"time"
@@ -24,17 +25,19 @@ import (
 )
 
 var (
-	coral            = lipgloss.Color("#FF7A90")
-	lavender         = lipgloss.Color("#A995FF")
-	ink              = lipgloss.Color("#E8E6F0")
-	muted            = lipgloss.Color("#777184")
-	surface          = lipgloss.Color("#25222C")
-	userMarkerStyle  = lipgloss.NewStyle().Foreground(lavender)
-	userLabelStyle   = lipgloss.NewStyle().Foreground(muted)
-	userContentStyle = lipgloss.NewStyle().Foreground(ink)
-	aliceStyle       = lipgloss.NewStyle().Foreground(ink).BorderLeft(true).BorderForeground(lavender).PaddingLeft(1).MarginTop(1)
-	logoStyle        = lipgloss.NewStyle().Bold(true).Foreground(coral)
-	mutedStyle       = lipgloss.NewStyle().Foreground(muted)
+	coral             = lipgloss.Color("#FF7A90")
+	lavender          = lipgloss.Color("#A995FF")
+	ink               = lipgloss.Color("#E8E6F0")
+	muted             = lipgloss.Color("#777184")
+	surface           = lipgloss.Color("#25222C")
+	userMarkerStyle   = lipgloss.NewStyle().Foreground(lavender)
+	userLabelStyle    = lipgloss.NewStyle().Foreground(muted)
+	userContentStyle  = lipgloss.NewStyle().Foreground(ink)
+	aliceStyle        = lipgloss.NewStyle().Foreground(ink).BorderLeft(true).BorderForeground(lavender).PaddingLeft(1).MarginTop(1)
+	logoStyle         = lipgloss.NewStyle().Bold(true).Foreground(coral)
+	mutedStyle        = lipgloss.NewStyle().Foreground(muted)
+	listMarkerStyle   = lipgloss.NewStyle().Foreground(lavender)
+	listMarkerPattern = regexp.MustCompile(`^(\s*)((?:\d+|[A-Za-z]|[IVXLCDMivxlcdm]+)[.)]|[•◦°])\s`)
 )
 
 type streamMsg chat.Event
@@ -813,9 +816,60 @@ func (m *Model) renderMarkdown(source string, width int) string {
 	if err != nil {
 		return source
 	}
+	rendered = colorListMarkers(rendered)
 	rendered = strings.Trim(rendered, "\n")
 	m.markdownCache[source] = rendered
 	return rendered
+}
+
+func colorListMarkers(rendered string) string {
+	lines := strings.Split(rendered, "\n")
+	for index, line := range lines {
+		plain := xansi.Strip(line)
+		markerStart, markerEnd, ok := listMarkerRange(plain)
+		if !ok {
+			continue
+		}
+		rawStart, startOK := rawOffsetForPlainByte(line, markerStart)
+		rawEnd, endOK := rawOffsetForPlainByte(line, markerEnd)
+		if !startOK || !endOK {
+			continue
+		}
+		marker := plain[markerStart:markerEnd]
+		lines[index] = line[:rawStart] + listMarkerStyle.Render(marker) + line[rawEnd:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+func listMarkerRange(line string) (int, int, bool) {
+	match := listMarkerPattern.FindStringSubmatchIndex(line)
+	if match == nil {
+		return 0, 0, false
+	}
+	return match[4], match[5], true
+}
+
+func rawOffsetForPlainByte(value string, target int) (int, bool) {
+	rawOffset, plainOffset := 0, 0
+	state := byte(xansi.NormalState)
+	for rawOffset < len(value) {
+		if plainOffset == target {
+			return rawOffset, true
+		}
+		sequence, width, size, nextState := xansi.DecodeSequence(value[rawOffset:], state, nil)
+		if size <= 0 {
+			return 0, false
+		}
+		if width > 0 {
+			if plainOffset+len(sequence) > target {
+				return 0, false
+			}
+			plainOffset += len(sequence)
+		}
+		rawOffset += size
+		state = nextState
+	}
+	return rawOffset, plainOffset == target
 }
 
 func markdownStyle() ansi.StyleConfig {

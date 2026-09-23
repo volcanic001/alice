@@ -105,6 +105,32 @@ func TestRenderMarkdownForNarrowViewport(t *testing.T) {
 	}
 }
 
+func TestMarkdownColorsOnlyListMarkers(t *testing.T) {
+	cases := map[string]string{
+		"  • viñeta":  "•",
+		"1. número":   "1.",
+		"a. letra":    "a.",
+		"III. romano": "III.",
+		"° círculo":   "°",
+	}
+	for line, marker := range cases {
+		start, end, ok := listMarkerRange(line)
+		if !ok || line[start:end] != marker {
+			t.Fatalf("marcador incorrecto para %q: %q, ok=%v", line, line[start:end], ok)
+		}
+	}
+	if _, _, ok := listMarkerRange("texto normal"); ok {
+		t.Fatal("texto normal detectado como lista")
+	}
+	source := "• viñeta\n1. número\na. letra\nIII. romano\n° círculo\ntexto normal"
+	if got := xansi.Strip(colorListMarkers(source)); got != source {
+		t.Fatalf("el coloreado alteró el contenido:\nwant: %q\n got: %q", source, got)
+	}
+	if color := fmt.Sprint(listMarkerStyle.GetForeground()); color != "#A995FF" {
+		t.Fatalf("color inesperado para marcadores: %s", color)
+	}
+}
+
 func TestRenderMarkdownCachesFinalMessagesByWidth(t *testing.T) {
 	model := Model{markdownCache: make(map[string]string)}
 	source := "**respuesta final**"
