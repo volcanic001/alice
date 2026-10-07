@@ -179,16 +179,7 @@ func TestCompleteStreamingFlow(t *testing.T) {
 	model.input.SetValue("hola!")
 
 	next, command := model.send()
-	current := next.(Model)
-	for step := 1; current.busy; step++ {
-		if command == nil {
-			t.Fatalf("paso %d: no se programó la siguiente lectura SSE", step)
-		}
-		message := command()
-		next, command = current.Update(message)
-		current = next.(Model)
-		t.Logf("paso %d: Bubble Tea recibió %T, draft=%q busy=%v siguiente=%v", step, message, current.draft, current.busy, command != nil)
-	}
+	current := drive(t, next.(Model), command, func(m Model) bool { return !m.busy })
 	if !requestReached {
 		t.Fatal("la request HTTP nunca llegó al servidor")
 	}
@@ -222,9 +213,7 @@ func TestStreamErrorIsFriendlyAndLeavesChatUsable(t *testing.T) {
 	model.input.SetValue("hola")
 
 	next, command := model.send()
-	current := next.(Model)
-	next, _ = current.Update(command())
-	current = next.(Model)
+	current := drive(t, next.(Model), command, func(m Model) bool { return !m.busy })
 	const expected = "⚠ Error de autenticación\nLa API key de DeepSeek no es válida."
 	if current.busy || current.cancel != nil || current.status != expected {
 		t.Fatalf("estado después del error: busy=%v cancel=%v status=%q", current.busy, current.cancel != nil, current.status)
@@ -242,8 +231,7 @@ func TestStreamErrorIsFriendlyAndLeavesChatUsable(t *testing.T) {
 	if !current.busy || command == nil {
 		t.Fatalf("el input no quedó utilizable: busy=%v command=%v", current.busy, command != nil)
 	}
-	next, _ = current.Update(command())
-	current = next.(Model)
+	current = drive(t, current, command, func(m Model) bool { return !m.busy })
 	if current.busy {
 		t.Fatal("la reintento dejó la interfaz generando")
 	}

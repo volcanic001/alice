@@ -20,6 +20,7 @@ import (
 
 	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/clipboard"
+	"github.com/volcanic001/alice/internal/memory"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/usage"
 )
@@ -84,6 +85,7 @@ type Model struct {
 	draft            string
 	busy             bool
 	status           string
+	thinkingFrame    int
 	markdown         *glamour.TermRenderer
 	markdownWidth    int
 	markdownCache    map[string]string
@@ -99,6 +101,10 @@ type Model struct {
 	searchInput      textarea.Model
 	clipboardWrite   func(context.Context, string) error
 	clipboardTimeout time.Duration
+	memory           *memory.Client
+	memoryBaseURL    string // sobreescribe la URL de mem0 en pruebas; vacío = producción
+	requestCtx       context.Context
+	lastUserContent  string
 }
 
 func New(database *store.Store, provider chat.Provider, requestModel string, temperature float64, usageStores ...*usage.Store) (Model, error) {
@@ -209,6 +215,7 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			if m.busy && m.cancel != nil {
 				m.cancel()
 				m.busy = false
+				m.requestCtx = nil
 				m.status = "Respuesta cancelada"
 				return m, nil
 			}
@@ -235,11 +242,29 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		case "alt+down":
 			return m.openRelative(1)
 		}
+	case memoryContextMsg:
+		if !m.busy {
+			// Se canceló mientras mem0 respondía; no arrancar el stream.
+			return m, nil
+		}
+		m.stream = m.provider.Stream(m.requestCtx, chat.Request{ConversationID: m.conversation.ID, Model: m.requestModel, Messages: message.messages, Temperature: m.temperature})
+		return m, waitForEvent(m.stream)
+	case memoryStoredMsg:
+		// mem0 procesa en segundo plano; no hay nada que reflejar en la UI.
+		return m, nil
+	case memoryKeyCheckedMsg:
+		if message.err != nil {
+			m.status = "⚠ Clave guardada, pero mem0 no respondió:\n" + message.err.Error()
+		} else {
+			m.status = "✓ Memoria activada y verificada con mem0"
+		}
+		return m, nil
 	case streamMsg:
 		event := chat.Event(message)
 		if event.Err != nil {
 			m.busy = false
 			m.cancel = nil
+			m.requestCtx = nil
 			m.pendingUsage = nil
 			if errors.Is(event.Err, context.Canceled) {
 				m.status = "Respuesta cancelada"
@@ -259,7 +284,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if event.Done {
 			m.busy = false
 			m.cancel = nil
+			m.requestCtx = nil
 			usageSaved := true
+			assistantContent := m.draft
 			if m.draft != "" {
 				if err := m.store.AddMessage(m.conversation.ID, "assistant", m.draft); err != nil {
 					m.status = err.Error()
@@ -282,9 +309,15 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				m.status = "Listo"
 			}
 			m.refresh()
-			return m, nil
+			return m, m.storeMemory(m.lastUserContent, assistantContent)
 		}
 		return m, waitForEvent(m.stream)
+	case thinkingTickMsg:
+		if !m.busy {
+			return m, nil
+		}
+		m.thinkingFrame++
+		return m, thinkingTick()
 	case errMsg:
 		m.status = message.err.Error()
 	case copyMsg:
@@ -322,12 +355,13 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.status = "Alice está pensando…"
 	m.draft = ""
 	m.pendingUsage = nil
+	m.lastUserContent = content
 	ctx, cancel := context.WithCancel(context.Background())
 	m.cancel = cancel
-	m.stream = m.provider.Stream(ctx, chat.Request{ConversationID: m.conversation.ID, Model: m.requestModel, Messages: m.messages, Temperature: m.temperature})
+	m.requestCtx = ctx
 	m.refresh()
 	m.goToPage(m.totalPages - 1)
-	return m, waitForEvent(m.stream)
+	return m, tea.Batch(m.fetchMemoryContext(ctx, content), thinkingTick())
 }
 
 // runLocalCommand handles exact, known commands and keeps unknown slash-led
@@ -355,6 +389,12 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 		next, command := m.copyLastResponse()
 		return next, command, true
 	default:
+		if strings.HasPrefix(content, "/memory") {
+			m.input.Reset()
+			argument := strings.TrimSpace(strings.TrimPrefix(content, "/memory"))
+			next, command := m.handleMemoryCommand(argument)
+			return next, command, true
+		}
 		if strings.HasPrefix(content, "/") {
 			command := strings.Fields(content)[0]
 			m.input.Reset()
@@ -717,10 +757,21 @@ func (m Model) placeColumn(column string) string {
 	return indent + strings.ReplaceAll(column, "\n", "\n"+indent)
 }
 
+// statusLine antepone la barra de trabajo al estado mientras Alice responde.
+// La reserva de ancho se mantiene aunque la animación esté detenida, para que
+// el alto de la conversación no salte al empezar o terminar una respuesta.
+func (m Model) statusLine() string {
+	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
+	status := mutedStyle.Render(m.status) + "  " + page
+	if !m.busy {
+		return status
+	}
+	return thinkingBar(m.thinkingFrame) + "  " + status
+}
+
 func (m Model) conversationHeight() int {
 	header := m.chatHeader(m.viewport.Width)
-	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
-	status := m.status + "  " + page
+	status := m.statusLine()
 	headerLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(header))
 	statusLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).Render(status))
 	inputLines := lipgloss.Height(lipgloss.NewStyle().Width(m.viewport.Width).BorderTop(true).Render(m.input.View()))
@@ -928,11 +979,10 @@ func (m Model) View() string {
 		return m.statsView()
 	}
 	header := m.chatHeader(m.viewport.Width)
-	page := mutedStyle.Render(fmt.Sprintf("pág %d/%d", m.currentPage+1, m.totalPages))
 	main := lipgloss.NewStyle().Width(m.viewport.Width).Render(lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Width(m.viewport.Width).Render(header),
 		m.viewport.View(),
-		lipgloss.NewStyle().Foreground(muted).Render(m.status+"  "+page),
+		lipgloss.NewStyle().Width(m.viewport.Width).Render(m.statusLine()),
 		lipgloss.NewStyle().BorderTop(true).BorderForeground(surface).Render(m.input.View()),
 		mutedStyle.Render(compactFooter(m.viewport.Width)),
 	))
@@ -943,7 +993,7 @@ func (m Model) helpView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
 	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
-	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n\n")
+	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n/memory      Ver estado de la memoria (mem0)\n/memory <key> Activar/cambiar la memoria\n/memory clear Desactivar la memoria\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")
