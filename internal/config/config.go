@@ -19,10 +19,11 @@ type Config struct {
 	UsagePath   string
 	Mem0APIKey  string
 	Mem0UserID  string // vacío cuando Mem0APIKey está vacío
+	BraveAPIKey string // vacío si la búsqueda web está desactivada
 }
 
 func Load() (Config, error) {
-	directory, err := Mem0Directory()
+	directory, err := Directory()
 	if err != nil {
 		return Config{}, err
 	}
@@ -41,20 +42,25 @@ func Load() (Config, error) {
 			return Config{}, err
 		}
 	}
+	braveAPIKey, err := loadBraveAPIKey(directory)
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		APIKey: os.Getenv("DEEPSEEK_API_KEY"), BaseURL: baseURL,
 		Model: provider.DeepSeekFlashModel, Temperature: 0.7,
 		DataPath:   filepath.Join(directory, "alice.db"),
 		UsagePath:  filepath.Join(directory, "usage.json"),
 		Mem0APIKey: mem0APIKey, Mem0UserID: mem0UserID,
+		BraveAPIKey: braveAPIKey,
 	}, nil
 }
 
-// Mem0Directory es el directorio de configuración de Alice
-// (~/.config/alice), creado si hace falta. Lo usa tanto Load como el comando
-// /memory de la TUI para guardar y leer la clave de mem0 sin pasar por
-// variables de entorno.
-func Mem0Directory() (string, error) {
+// Directory es el directorio de configuración de Alice (~/.config/alice),
+// creado si hace falta. Lo usa Load y los comandos de la TUI (/memory,
+// /search-key) para guardar y leer claves sin pasar por variables de
+// entorno.
+func Directory() (string, error) {
 	directory, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
@@ -88,7 +94,7 @@ func loadMem0APIKey(directory string) (string, error) {
 // SaveMem0APIKey guarda la clave de mem0 y devuelve el user_id asociado
 // (generándolo si es la primera vez). Usado por el comando /memory.
 func SaveMem0APIKey(apiKey string) (userID string, err error) {
-	directory, err := Mem0Directory()
+	directory, err := Directory()
 	if err != nil {
 		return "", err
 	}
@@ -102,7 +108,7 @@ func SaveMem0APIKey(apiKey string) (userID string, err error) {
 // vacío en vez de borrarlo, para que una MEM0_API_KEY del entorno no la
 // reactive sola en el siguiente arranque.
 func ClearMem0APIKey() error {
-	directory, err := Mem0Directory()
+	directory, err := Directory()
 	if err != nil {
 		return err
 	}
@@ -126,4 +132,41 @@ func loadOrCreateMem0UserID(directory string) (string, error) {
 		return "", err
 	}
 	return id, nil
+}
+
+const braveAPIKeyFile = "brave_api_key"
+
+// loadBraveAPIKey sigue la misma regla de precedencia que loadMem0APIKey:
+// archivo de /search-key manda sobre BRAVE_API_KEY del entorno, incluso si
+// el archivo está vacío (desactivación explícita).
+func loadBraveAPIKey(directory string) (string, error) {
+	content, err := os.ReadFile(filepath.Join(directory, braveAPIKeyFile))
+	switch {
+	case err == nil:
+		return strings.TrimSpace(string(content)), nil
+	case os.IsNotExist(err):
+		return os.Getenv("BRAVE_API_KEY"), nil
+	default:
+		return "", err
+	}
+}
+
+// SaveBraveAPIKey guarda la clave de Brave Search. Usado por /search-key.
+func SaveBraveAPIKey(apiKey string) error {
+	directory, err := Directory()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(directory, braveAPIKeyFile), []byte(apiKey+"\n"), 0600)
+}
+
+// ClearBraveAPIKey desactiva la búsqueda web de forma explícita, igual que
+// ClearMem0APIKey: un archivo vacío gana siempre sobre BRAVE_API_KEY del
+// entorno.
+func ClearBraveAPIKey() error {
+	directory, err := Directory()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(directory, braveAPIKeyFile), nil, 0600)
 }

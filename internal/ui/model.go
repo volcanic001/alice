@@ -21,6 +21,7 @@ import (
 	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/clipboard"
 	"github.com/volcanic001/alice/internal/memory"
+	"github.com/volcanic001/alice/internal/search"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/usage"
 )
@@ -103,6 +104,8 @@ type Model struct {
 	clipboardTimeout time.Duration
 	memory           *memory.Client
 	memoryBaseURL    string // sobreescribe la URL de mem0 en pruebas; vacío = producción
+	webSearch        *search.Client
+	webSearchBaseURL string // sobreescribe la URL de Brave en pruebas; vacío = producción
 	requestCtx       context.Context
 	lastUserContent  string
 }
@@ -259,6 +262,30 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "✓ Memoria activada y verificada con mem0"
 		}
 		return m, nil
+	case searchContextMsg:
+		if !m.busy {
+			// Se canceló mientras Brave respondía; no seguir la cadena.
+			return m, nil
+		}
+		if message.err != nil {
+			m.busy = false
+			m.cancel = nil
+			m.requestCtx = nil
+			m.status = "⚠ No se pudo buscar en internet\n" + message.err.Error()
+			return m, nil
+		}
+		var extra []chat.Message
+		if message.context != "" {
+			extra = append(extra, chat.Message{Role: "system", Content: message.context})
+		}
+		return m, m.fetchMemoryContext(m.requestCtx, m.lastUserContent, extra...)
+	case searchKeyCheckedMsg:
+		if message.err != nil {
+			m.status = "⚠ Clave guardada, pero Brave no respondió:\n" + message.err.Error()
+		} else {
+			m.status = "✓ Búsqueda web activada y verificada con Brave"
+		}
+		return m, nil
 	case streamMsg:
 		event := chat.Event(message)
 		if event.Err != nil {
@@ -345,14 +372,27 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	if next, command, handled := m.runLocalCommand(content); handled {
 		return next, command
 	}
-	if err := m.store.AddMessage(m.conversation.ID, "user", content); err != nil {
+	next, ctx, err := m.beginTurn(content)
+	if err != nil {
 		m.status = err.Error()
 		return m, nil
+	}
+	next.status = "Alice está pensando…"
+	return next, tea.Batch(next.fetchMemoryContext(ctx, content), thinkingTick())
+}
+
+// beginTurn registra el mensaje del usuario, pone a Alice en estado "ocupado"
+// y arranca el contexto cancelable que comparten todos los pasos de este
+// turno (búsqueda web, mem0 y finalmente el stream de DeepSeek). Lo usan
+// tanto send() como /search — cada uno decide después con qué comando async
+// arrancar la cadena.
+func (m Model) beginTurn(content string) (Model, context.Context, error) {
+	if err := m.store.AddMessage(m.conversation.ID, "user", content); err != nil {
+		return m, nil, err
 	}
 	m.messages = append(m.messages, chat.Message{ConversationID: m.conversation.ID, Role: "user", Content: content})
 	m.input.Reset()
 	m.busy = true
-	m.status = "Alice está pensando…"
 	m.draft = ""
 	m.pendingUsage = nil
 	m.lastUserContent = content
@@ -361,7 +401,7 @@ func (m Model) send() (tea.Model, tea.Cmd) {
 	m.requestCtx = ctx
 	m.refresh()
 	m.goToPage(m.totalPages - 1)
-	return m, tea.Batch(m.fetchMemoryContext(ctx, content), thinkingTick())
+	return m, ctx, nil
 }
 
 // runLocalCommand handles exact, known commands and keeps unknown slash-led
@@ -393,6 +433,26 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 			m.input.Reset()
 			argument := strings.TrimSpace(strings.TrimPrefix(content, "/memory"))
 			next, command := m.handleMemoryCommand(argument)
+			return next, command, true
+		}
+		// /search-key se revisa antes que /search porque "/search" es
+		// prefijo literal de "/search-key".
+		if strings.HasPrefix(content, "/search-key") {
+			m.input.Reset()
+			argument := strings.TrimSpace(strings.TrimPrefix(content, "/search-key"))
+			next, command := m.handleSearchKeyCommand(argument)
+			return next, command, true
+		}
+		if strings.HasPrefix(content, "/search") {
+			m.input.Reset()
+			query := strings.TrimSpace(strings.TrimPrefix(content, "/search"))
+			next, command := m.beginWebSearch(query)
+			return next, command, true
+		}
+		if strings.HasPrefix(content, "/news") {
+			m.input.Reset()
+			query := strings.TrimSpace(strings.TrimPrefix(content, "/news"))
+			next, command := m.beginNews(query)
 			return next, command, true
 		}
 		if strings.HasPrefix(content, "/") {
@@ -993,7 +1053,9 @@ func (m Model) helpView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
 	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
-	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n/memory      Ver estado de la memoria (mem0)\n/memory <key> Activar/cambiar la memoria\n/memory clear Desactivar la memoria\n\n")
+	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n\n")
+	body.WriteString("/memory      Ver estado de la memoria (mem0)\n/memory <key> Activar/cambiar la memoria\n/memory clear Desactivar la memoria\n\n")
+	body.WriteString("/search <pregunta>   Buscar en internet y responder\n/news <tema>         Noticias de últimas 24h y responder\n/search-key          Ver estado de la búsqueda web (Brave)\n/search-key <key>    Activar/cambiar la clave de Brave\n/search-key clear    Desactivar la búsqueda web\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")

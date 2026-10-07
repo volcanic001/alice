@@ -11,6 +11,7 @@ func TestLoadUsesEffectiveDeepSeekFlashConfiguration(t *testing.T) {
 	t.Setenv("DEEPSEEK_BASE_URL", "")
 	t.Setenv("DEEPSEEK_API_KEY", "test")
 	t.Setenv("MEM0_API_KEY", "")
+	t.Setenv("BRAVE_API_KEY", "")
 
 	configuration, err := Load()
 	if err != nil {
@@ -27,6 +28,9 @@ func TestLoadUsesEffectiveDeepSeekFlashConfiguration(t *testing.T) {
 	}
 	if configuration.Mem0APIKey != "" || configuration.Mem0UserID != "" {
 		t.Fatalf("mem0 debería quedar desactivado sin MEM0_API_KEY: %+v", configuration)
+	}
+	if configuration.BraveAPIKey != "" {
+		t.Fatalf("la búsqueda web debería quedar desactivada sin BRAVE_API_KEY: %+v", configuration)
 	}
 }
 
@@ -95,5 +99,44 @@ func TestClearMem0APIKeyWinsOverStaleEnvVar(t *testing.T) {
 	}
 	if configuration.Mem0APIKey != "" || configuration.Mem0UserID != "" {
 		t.Fatalf("/memory clear debe ganarle a una MEM0_API_KEY del entorno: %+v", configuration)
+	}
+}
+
+func TestSaveBraveAPIKeyActivatesSearchWithoutEnvVar(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "test")
+	t.Setenv("BRAVE_API_KEY", "")
+
+	if err := SaveBraveAPIKey("clave-brave"); err != nil {
+		t.Fatal(err)
+	}
+
+	configuration, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.BraveAPIKey != "clave-brave" {
+		t.Fatalf("Load no recogió la clave guardada por /search-key: %+v", configuration)
+	}
+}
+
+func TestClearBraveAPIKeyWinsOverStaleEnvVar(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "test")
+	t.Setenv("BRAVE_API_KEY", "clave-vieja-del-entorno")
+
+	if err := SaveBraveAPIKey("clave-desde-la-app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearBraveAPIKey(); err != nil {
+		t.Fatal(err)
+	}
+
+	configuration, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.BraveAPIKey != "" {
+		t.Fatalf("/search-key clear debe ganarle a una BRAVE_API_KEY del entorno: %+v", configuration)
 	}
 }

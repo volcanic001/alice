@@ -9,6 +9,7 @@ import (
 	"github.com/volcanic001/alice/internal/config"
 	"github.com/volcanic001/alice/internal/memory"
 	"github.com/volcanic001/alice/internal/provider"
+	"github.com/volcanic001/alice/internal/search"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/ui"
 	"github.com/volcanic001/alice/internal/usage"
@@ -30,6 +31,9 @@ func main() {
 	}
 	if configuration.Mem0APIKey != "" {
 		model.SetMemory(memory.New(configuration.Mem0APIKey, configuration.Mem0UserID))
+	}
+	if configuration.BraveAPIKey != "" {
+		model.SetWebSearch(search.New(configuration.BraveAPIKey))
 	}
 	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {

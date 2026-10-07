@@ -101,17 +101,22 @@ func (m Model) checkMemoryKey() tea.Cmd {
 // recordar entre conversaciones". Si mem0 no está configurado o la búsqueda
 // tarda más de memorySearchTimeout, Alice sigue sin memoria para este turno
 // en vez de bloquear la conversación.
-func (m Model) fetchMemoryContext(ctx context.Context, query string) tea.Cmd {
+//
+// extra antepone mensajes de sistema adicionales antes que los de mem0 —
+// hoy solo lo usa /search, para encadenar el contexto de Brave antes de
+// llegar al de mem0 y, finalmente, al stream de DeepSeek.
+func (m Model) fetchMemoryContext(ctx context.Context, query string, extra ...chat.Message) tea.Cmd {
 	client := m.memory
 	messages := m.messages
 	return func() tea.Msg {
 		if client == nil {
-			return memoryContextMsg{messages: messages}
+			return memoryContextMsg{messages: append(append([]chat.Message{}, extra...), messages...)}
 		}
 		searchCtx, cancel := context.WithTimeout(ctx, memorySearchTimeout)
 		defer cancel()
 		facts, _ := client.Search(searchCtx, query) // un fallo aquí deja la lista vacía, no corta el turno
-		augmented := make([]chat.Message, 0, len(messages)+1)
+		augmented := make([]chat.Message, 0, len(extra)+1+len(messages))
+		augmented = append(augmented, extra...)
 		augmented = append(augmented, chat.Message{Role: "system", Content: formatMemoryContext(facts)})
 		augmented = append(augmented, messages...)
 		return memoryContextMsg{messages: augmented}
