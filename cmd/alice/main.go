@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/volcanic001/alice/internal/config"
+	"github.com/volcanic001/alice/internal/memory"
 	"github.com/volcanic001/alice/internal/provider"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/ui"
@@ -26,6 +27,9 @@ func main() {
 	model, err := ui.New(database, provider.DeepSeek{APIKey: configuration.APIKey, BaseURL: configuration.BaseURL}, configuration.Model, configuration.Temperature, usage.New(configuration.UsagePath))
 	if err != nil {
 		fail(err)
+	}
+	if configuration.Mem0APIKey != "" {
+		model.SetMemory(memory.New(configuration.Mem0APIKey, configuration.Mem0UserID))
 	}
 	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {

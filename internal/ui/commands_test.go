@@ -103,11 +103,7 @@ func TestFinalUsageChunkIsPropagatedAndPersisted(t *testing.T) {
 	model.provider = provider.DeepSeek{APIKey: "secreto", BaseURL: server.URL}
 	model.input.SetValue("saluda")
 	next, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
-	model = next.(Model)
-	for command != nil {
-		next, command = model.Update(command())
-		model = next.(Model)
-	}
+	model = drive(t, next.(Model), command, nil)
 	if model.busy {
 		t.Fatal("el stream no terminó")
 	}
@@ -209,7 +205,12 @@ func TestUnknownSlashCommandStaysLocal(t *testing.T) {
 
 func TestSlashInsideNormalTextUsesProvider(t *testing.T) {
 	model, provider := testCommandModel(t)
-	model = submitInput(t, model, "¿Qué es /etc en Linux?")
+	model.input.SetValue("¿Qué es /etc en Linux?")
+	next, command := model.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	// El Enter dispara primero la búsqueda de contexto en mem0 (sin cliente
+	// configurado, se resuelve al instante); avanzamos solo hasta que esa
+	// búsqueda llega al provider, sin tocar el stream en sí.
+	model = drive(t, next.(Model), command, func(Model) bool { return len(provider.requests) > 0 })
 	if len(provider.requests) != 1 || provider.requests[0].Model != "deepseek-flash" || provider.requests[0].Temperature != 0.7 || !model.busy || len(model.messages) != 1 || model.messages[0].Content != "¿Qué es /etc en Linux?" {
 		t.Fatalf("el texto normal no siguió el flujo del provider: requests=%d busy=%v mensajes=%#v", len(provider.requests), model.busy, model.messages)
 	}
