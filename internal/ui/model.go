@@ -20,10 +20,12 @@ import (
 
 	"github.com/volcanic001/alice/internal/chat"
 	"github.com/volcanic001/alice/internal/clipboard"
+	"github.com/volcanic001/alice/internal/config"
 	"github.com/volcanic001/alice/internal/memory"
 	"github.com/volcanic001/alice/internal/search"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/usage"
+	"github.com/volcanic001/alice/internal/weather"
 )
 
 var (
@@ -84,6 +86,7 @@ type Model struct {
 	pendingUsage     *chat.UsageRecord
 	usageStore       *usage.Store
 	draft            string
+	weatherDisplay   string // /weather ya renderizado con lipgloss; burbuja aparte, no entra a m.messages
 	busy             bool
 	status           string
 	thinkingFrame    int
@@ -106,6 +109,7 @@ type Model struct {
 	memoryBaseURL    string // sobreescribe la URL de mem0 en pruebas; vacío = producción
 	webSearch        *search.Client
 	webSearchBaseURL string // sobreescribe la URL de Brave en pruebas; vacío = producción
+	weather          *weather.Client
 	requestCtx       context.Context
 	lastUserContent  string
 }
@@ -286,6 +290,39 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "✓ Búsqueda web activada y verificada con Brave"
 		}
 		return m, nil
+	case weatherGeocodeMsg:
+		if message.err != nil {
+			m.status = "No se pudo buscar \"" + message.query + "\": " + message.err.Error()
+			return m, nil
+		}
+		switch len(message.cities) {
+		case 0:
+			m.status = "No encontré \"" + message.query + "\". Probá con el nombre oficial completo (p. ej. \"San Juan Tepezontes\" en vez de solo \"Tepezontes\")."
+		case 1:
+			found := message.cities[0]
+			city := config.WeatherCity{
+				Name: found.Name, Country: found.Country, Admin1: found.Admin1,
+				Latitude: found.Latitude, Longitude: found.Longitude, Timezone: found.Timezone,
+			}
+			if err := config.SaveWeatherCity(city); err != nil {
+				m.status = err.Error()
+				return m, nil
+			}
+			m.status = "✓ " + found.Name + ", " + found.Country + " guardada\nUsa /weather " + found.Name + " para ver el clima"
+		default:
+			m.status = weatherCityDisambiguation(message.query, message.cities)
+		}
+		return m, nil
+	case weatherForecastMsg:
+		if message.err != nil {
+			m.status = "No se pudo consultar el clima: " + message.err.Error()
+			return m, nil
+		}
+		m.weatherDisplay = formatForecast(message.city, message.forecast)
+		m.status = "Listo"
+		m.refresh()
+		m.goToPage(m.totalPages - 1)
+		return m, nil
 	case streamMsg:
 		event := chat.Event(message)
 		if event.Err != nil {
@@ -394,6 +431,7 @@ func (m Model) beginTurn(content string) (Model, context.Context, error) {
 	m.input.Reset()
 	m.busy = true
 	m.draft = ""
+	m.weatherDisplay = ""
 	m.pendingUsage = nil
 	m.lastUserContent = content
 	ctx, cancel := context.WithCancel(context.Background())
@@ -453,6 +491,12 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 			m.input.Reset()
 			query := strings.TrimSpace(strings.TrimPrefix(content, "/news"))
 			next, command := m.beginNews(query)
+			return next, command, true
+		}
+		if strings.HasPrefix(content, "/weather") {
+			m.input.Reset()
+			argument := strings.TrimSpace(strings.TrimPrefix(content, "/weather"))
+			next, command := m.handleWeatherCommand(argument)
 			return next, command, true
 		}
 		if strings.HasPrefix(content, "/") {
@@ -534,6 +578,7 @@ func (m Model) openConversation(index int) (tea.Model, tea.Cmd) {
 	}
 	m.messages = messages
 	m.screen = chatScreen
+	m.weatherDisplay = ""
 	if m.searchActive {
 		m.searchActive = false
 		m.searchInput.Reset()
@@ -552,6 +597,7 @@ func (m Model) newConversation() (tea.Model, tea.Cmd) {
 	m.conversations = append([]chat.Conversation{conversation}, m.conversations...)
 	m.conversation, m.messages = conversation, nil
 	m.screen = chatScreen
+	m.weatherDisplay = ""
 	m.refresh()
 	return m, m.input.Focus()
 }
@@ -857,6 +903,9 @@ func (m *Model) refresh() {
 	if m.draft != "" {
 		body.WriteString(aliceStyle.Width(messageWidth).Render("Alice\n" + m.draft + " ▌"))
 	}
+	if m.weatherDisplay != "" {
+		body.WriteString("\n" + aliceStyle.Width(messageWidth).Render("Clima\n"+m.weatherDisplay))
+	}
 	m.setPages(body.String())
 }
 
@@ -1056,6 +1105,7 @@ func (m Model) helpView() string {
 	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n\n")
 	body.WriteString("/memory      Ver estado de la memoria (mem0)\n/memory <key> Activar/cambiar la memoria\n/memory clear Desactivar la memoria\n\n")
 	body.WriteString("/search <pregunta>   Buscar en internet y responder\n/news <tema>         Noticias de últimas 24h y responder\n/search-key          Ver estado de la búsqueda web (Brave)\n/search-key <key>    Activar/cambiar la clave de Brave\n/search-key clear    Desactivar la búsqueda web\n\n")
+	body.WriteString("/weather                Clima en tu ciudad default\n/weather <ciudad>       Clima de una ciudad guardada (nombre o parte)\n/weather add <ciudad>   Guardar una ciudad\n/weather list           Ver ciudades guardadas\n/weather remove <ciudad> Quitar una ciudad\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")

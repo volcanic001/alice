@@ -13,6 +13,7 @@ import (
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/ui"
 	"github.com/volcanic001/alice/internal/usage"
+	"github.com/volcanic001/alice/internal/weather"
 )
 
 func main() {
@@ -35,6 +36,7 @@ func main() {
 	if configuration.BraveAPIKey != "" {
 		model.SetWebSearch(search.New(configuration.BraveAPIKey))
 	}
+	model.SetWeather(weather.New())
 	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fail(err)
