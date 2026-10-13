@@ -35,6 +35,7 @@ const (
 
 // APIError conserva datos técnicos para diagnóstico sin exponerlos en Error.
 type APIError struct {
+	Provider   string
 	Kind       ErrorKind
 	StatusCode int
 	Cause      error
@@ -43,17 +44,17 @@ type APIError struct {
 func (e *APIError) Error() string {
 	switch e.Kind {
 	case AuthenticationError:
-		return "⚠ Error de autenticación\nLa API key de DeepSeek no es válida."
+		return "⚠ Error de autenticación\nLa API key de " + e.Provider + " no es válida."
 	case InsufficientBalanceError:
-		return "⚠ Saldo insuficiente\nRevisa el saldo de tu cuenta de DeepSeek."
+		return "⚠ Saldo insuficiente\nRevisa el saldo de tu cuenta de " + e.Provider + "."
 	case RateLimitError:
 		return "⚠ Demasiadas solicitudes\nEspera un momento e inténtalo de nuevo."
 	case ServiceUnavailableError:
-		return "⚠ DeepSeek no está disponible\nInténtalo de nuevo más tarde."
+		return "⚠ " + e.Provider + " no está disponible\nInténtalo de nuevo más tarde."
 	case TimeoutError:
 		return "⚠ La solicitud tardó demasiado\nInténtalo de nuevo."
 	case NetworkError:
-		return "⚠ No se pudo conectar con DeepSeek\nRevisa tu conexión a Internet."
+		return "⚠ No se pudo conectar con " + e.Provider + "\nRevisa tu conexión a Internet."
 	default:
 		return "⚠ Ocurrió un error\nNo se pudo completar la respuesta."
 	}
@@ -71,22 +72,22 @@ func (e *APIError) Technical() string {
 	return string(e.Kind)
 }
 
-func apiError(kind ErrorKind, statusCode int, cause error) error {
-	return &APIError{Kind: kind, StatusCode: statusCode, Cause: cause}
+func apiError(provider string, kind ErrorKind, statusCode int, cause error) error {
+	return &APIError{Provider: provider, Kind: kind, StatusCode: statusCode, Cause: cause}
 }
 
-func classifyHTTPError(statusCode int, body []byte) error {
+func classifyHTTPError(provider string, statusCode int, body []byte) error {
 	switch {
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
-		return apiError(AuthenticationError, statusCode, nil)
+		return apiError(provider, AuthenticationError, statusCode, nil)
 	case statusCode == http.StatusPaymentRequired || indicatesInsufficientBalance(body):
-		return apiError(InsufficientBalanceError, statusCode, nil)
+		return apiError(provider, InsufficientBalanceError, statusCode, nil)
 	case statusCode == http.StatusTooManyRequests:
-		return apiError(RateLimitError, statusCode, nil)
+		return apiError(provider, RateLimitError, statusCode, nil)
 	case statusCode >= http.StatusInternalServerError && statusCode < 600:
-		return apiError(ServiceUnavailableError, statusCode, nil)
+		return apiError(provider, ServiceUnavailableError, statusCode, nil)
 	default:
-		return apiError(UnknownError, statusCode, nil)
+		return apiError(provider, UnknownError, statusCode, nil)
 	}
 }
 
@@ -105,31 +106,31 @@ func indicatesInsufficientBalance(body []byte) bool {
 	return strings.Contains(details, "insufficient_balance") || strings.Contains(details, "insufficient balance") || strings.Contains(details, "insufficient credit") || strings.Contains(details, "insufficient quota")
 }
 
-func classifyTransportError(err error) error {
+func classifyTransportError(provider string, err error) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return apiError(TimeoutError, 0, err)
+		return apiError(provider, TimeoutError, 0, err)
 	}
 	var networkError net.Error
 	if errors.As(err, &networkError) && networkError.Timeout() {
-		return apiError(TimeoutError, 0, err)
+		return apiError(provider, TimeoutError, 0, err)
 	}
-	return apiError(NetworkError, 0, err)
+	return apiError(provider, NetworkError, 0, err)
 }
 
-func classifyError(err error) error {
+func classifyError(provider string, err error) error {
 	if errors.Is(err, context.Canceled) {
 		return context.Canceled
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
-		return apiError(TimeoutError, 0, err)
+		return apiError(provider, TimeoutError, 0, err)
 	}
-	return apiError(UnknownError, 0, err)
+	return apiError(provider, UnknownError, 0, err)
 }
 
-func classifyStreamError(body []byte) error {
+func classifyStreamError(provider string, body []byte) error {
 	var response struct {
 		Error *struct {
 			Code string `json:"code"`
@@ -142,15 +143,15 @@ func classifyStreamError(body []byte) error {
 	details := strings.ToLower(response.Error.Code + " " + response.Error.Type)
 	switch {
 	case strings.Contains(details, "authentication") || strings.Contains(details, "invalid_api_key"):
-		return apiError(AuthenticationError, 0, nil)
+		return apiError(provider, AuthenticationError, 0, nil)
 	case indicatesInsufficientBalance(body):
-		return apiError(InsufficientBalanceError, 0, nil)
+		return apiError(provider, InsufficientBalanceError, 0, nil)
 	case strings.Contains(details, "rate_limit"):
-		return apiError(RateLimitError, 0, nil)
+		return apiError(provider, RateLimitError, 0, nil)
 	case strings.Contains(details, "server") || strings.Contains(details, "service_unavailable"):
-		return apiError(ServiceUnavailableError, 0, nil)
+		return apiError(provider, ServiceUnavailableError, 0, nil)
 	default:
-		return apiError(UnknownError, 0, nil)
+		return apiError(provider, UnknownError, 0, nil)
 	}
 }
 
@@ -198,14 +199,33 @@ func usageRecord(conversationID int64, model string, usage *deepSeekUsage, reque
 }
 
 func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.Event {
+	return streamOpenAICompatible(ctx, request, openAICompatible{
+		Name: "DeepSeek", APIKey: d.APIKey, BaseURL: d.BaseURL, DefaultBaseURL: "https://api.deepseek.com",
+		Client: d.Client, FirstTokenTimeout: d.FirstTokenTimeout,
+	})
+}
+
+// openAICompatible agrupa lo necesario para hablar con cualquier API que siga
+// el formato de chat completions de OpenAI (DeepSeek, Venice, ...). Solo
+// cambia el nombre (para los mensajes de error), la API key y la URL base.
+type openAICompatible struct {
+	Name              string
+	APIKey            string
+	BaseURL           string
+	DefaultBaseURL    string
+	Client            *http.Client
+	FirstTokenTimeout time.Duration
+}
+
+func streamOpenAICompatible(ctx context.Context, request chat.Request, cfg openAICompatible) <-chan chat.Event {
 	out := make(chan chat.Event)
 	go func() {
 		defer close(out)
-		if d.APIKey == "" {
-			out <- chat.Event{Err: apiError(AuthenticationError, 0, errors.New("missing API key"))}
+		if cfg.APIKey == "" {
+			out <- chat.Event{Err: apiError(cfg.Name, AuthenticationError, 0, errors.New("missing API key"))}
 			return
 		}
-		timeout := d.FirstTokenTimeout
+		timeout := cfg.FirstTokenTimeout
 		if timeout <= 0 {
 			timeout = 30 * time.Second
 		}
@@ -228,21 +248,21 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 			"stream_options": map[string]bool{"include_usage": true},
 		})
 		if err != nil {
-			out <- chat.Event{Err: classifyError(err)}
+			out <- chat.Event{Err: classifyError(cfg.Name, err)}
 			return
 		}
-		baseURL := strings.TrimRight(d.BaseURL, "/")
+		baseURL := strings.TrimRight(cfg.BaseURL, "/")
 		if baseURL == "" {
-			baseURL = "https://api.deepseek.com"
+			baseURL = cfg.DefaultBaseURL
 		}
 		req, err := http.NewRequestWithContext(requestContext, http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(payload))
 		if err != nil {
-			out <- chat.Event{Err: classifyError(err)}
+			out <- chat.Event{Err: classifyError(cfg.Name, err)}
 			return
 		}
-		req.Header.Set("Authorization", "Bearer "+d.APIKey)
+		req.Header.Set("Authorization", "Bearer "+cfg.APIKey)
 		req.Header.Set("Content-Type", "application/json")
-		client := d.Client
+		client := cfg.Client
 		if client == nil {
 			client = http.DefaultClient
 		}
@@ -251,16 +271,16 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 		if err != nil {
 			select {
 			case <-timedOut:
-				out <- chat.Event{Err: apiError(TimeoutError, 0, context.DeadlineExceeded)}
+				out <- chat.Event{Err: apiError(cfg.Name, TimeoutError, 0, context.DeadlineExceeded)}
 			default:
-				out <- chat.Event{Err: classifyTransportError(err)}
+				out <- chat.Event{Err: classifyTransportError(cfg.Name, err)}
 			}
 			return
 		}
 		defer response.Body.Close()
 		if response.StatusCode >= 300 {
 			body, _ := io.ReadAll(io.LimitReader(response.Body, 4096))
-			out <- chat.Event{Err: classifyHTTPError(response.StatusCode, body)}
+			out <- chat.Event{Err: classifyHTTPError(cfg.Name, response.StatusCode, body)}
 			return
 		}
 		scanner := bufio.NewScanner(response.Body)
@@ -270,12 +290,19 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 			if !strings.HasPrefix(line, "data:") {
 				continue
 			}
+			// Cualquier chunk real prueba que el servidor sigue ahí, aunque
+			// todavía no haya texto de respuesta: algunos modelos (los que
+			// razonan antes de responder) mandan varios segundos de
+			// "reasoning_content" con el campo content vacío. Si solo
+			// paráramos el timer al ver content, ese razonamiento se
+			// confundiría con una conexión colgada.
+			timer.Stop()
 			data := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
 			if data == "[DONE]" {
 				out <- chat.Event{Done: true}
 				return
 			}
-			if streamError := classifyStreamError([]byte(data)); streamError != nil {
+			if streamError := classifyStreamError(cfg.Name, []byte(data)); streamError != nil {
 				out <- chat.Event{Err: streamError}
 				return
 			}
@@ -284,22 +311,20 @@ func (d DeepSeek) Stream(ctx context.Context, request chat.Request) <-chan chat.
 				continue
 			}
 			if usage := usageRecord(request.ConversationID, chunk.Model, chunk.Usage, requestedAt); usage != nil {
-				timer.Stop()
 				out <- chat.Event{Usage: usage}
 			}
 			if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != "" {
-				timer.Stop()
 				out <- chat.Event{Text: chunk.Choices[0].Delta.Content}
 			}
 		}
 		select {
 		case <-timedOut:
-			out <- chat.Event{Err: apiError(TimeoutError, 0, context.DeadlineExceeded)}
+			out <- chat.Event{Err: apiError(cfg.Name, TimeoutError, 0, context.DeadlineExceeded)}
 			return
 		default:
 		}
 		if err := scanner.Err(); err != nil {
-			out <- chat.Event{Err: classifyTransportError(err)}
+			out <- chat.Event{Err: classifyTransportError(cfg.Name, err)}
 			return
 		}
 		out <- chat.Event{Done: true}

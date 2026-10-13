@@ -11,15 +11,19 @@ import (
 )
 
 type Config struct {
-	APIKey      string
-	BaseURL     string
-	Model       string
-	Temperature float64
-	DataPath    string
-	UsagePath   string
-	Mem0APIKey  string
-	Mem0UserID  string // vacío cuando Mem0APIKey está vacío
-	BraveAPIKey string // vacío si la búsqueda web está desactivada
+	APIKey        string
+	BaseURL       string
+	Model         string
+	Temperature   float64
+	DataPath      string
+	UsagePath     string
+	Mem0APIKey    string
+	Mem0UserID    string // vacío cuando Mem0APIKey está vacío
+	BraveAPIKey   string // vacío si la búsqueda web está desactivada
+	SystemPrompt  string // vacío = comportamiento default, sin prompt de sistema custom
+	VeniceAPIKey  string // vacío = seguir usando DeepSeek como antes
+	VeniceBaseURL string
+	VeniceModel   string
 }
 
 func Load() (Config, error) {
@@ -46,13 +50,28 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	systemPrompt, err := loadSystemPrompt(directory)
+	if err != nil {
+		return Config{}, err
+	}
+	veniceAPIKey, err := loadVeniceAPIKey(directory)
+	if err != nil {
+		return Config{}, err
+	}
+	veniceModel := os.Getenv("VENICE_MODEL")
+	if veniceModel == "" {
+		veniceModel = provider.VeniceRecommendedModel
+	}
 	return Config{
 		APIKey: os.Getenv("DEEPSEEK_API_KEY"), BaseURL: baseURL,
 		Model: provider.DeepSeekFlashModel, Temperature: 0.7,
 		DataPath:   filepath.Join(directory, "alice.db"),
 		UsagePath:  filepath.Join(directory, "usage.json"),
 		Mem0APIKey: mem0APIKey, Mem0UserID: mem0UserID,
-		BraveAPIKey: braveAPIKey,
+		BraveAPIKey:  braveAPIKey,
+		SystemPrompt: systemPrompt,
+		VeniceAPIKey: veniceAPIKey, VeniceBaseURL: os.Getenv("VENICE_BASE_URL"),
+		VeniceModel: veniceModel,
 	}, nil
 }
 
@@ -169,4 +188,79 @@ func ClearBraveAPIKey() error {
 		return err
 	}
 	return os.WriteFile(filepath.Join(directory, braveAPIKeyFile), nil, 0600)
+}
+
+const veniceAPIKeyFile = "venice_api_key"
+
+// loadVeniceAPIKey sigue la misma regla de precedencia que loadBraveAPIKey:
+// archivo de /venice-key manda sobre VENICE_API_KEY del entorno, incluso si
+// el archivo está vacío (desactivación explícita, vuelve a DeepSeek).
+func loadVeniceAPIKey(directory string) (string, error) {
+	content, err := os.ReadFile(filepath.Join(directory, veniceAPIKeyFile))
+	switch {
+	case err == nil:
+		return strings.TrimSpace(string(content)), nil
+	case os.IsNotExist(err):
+		return os.Getenv("VENICE_API_KEY"), nil
+	default:
+		return "", err
+	}
+}
+
+// SaveVeniceAPIKey guarda la clave de Venice. Usado por /venice-key.
+func SaveVeniceAPIKey(apiKey string) error {
+	directory, err := Directory()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(directory, veniceAPIKeyFile), []byte(apiKey+"\n"), 0600)
+}
+
+// ClearVeniceAPIKey desactiva Venice de forma explícita, igual que
+// ClearBraveAPIKey: un archivo vacío gana siempre sobre VENICE_API_KEY del
+// entorno. Alice vuelve a usar DeepSeek.
+func ClearVeniceAPIKey() error {
+	directory, err := Directory()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(directory, veniceAPIKeyFile), nil, 0600)
+}
+
+const systemPromptFile = "system_prompt"
+
+// loadSystemPrompt sigue la misma regla de precedencia que loadMem0APIKey y
+// loadBraveAPIKey: el archivo que deja /prompt manda sobre ALICE_SYSTEM_PROMPT
+// del entorno, incluso vacío (desactivación explícita desde la pantalla
+// dedicada o con "/prompt clear").
+func loadSystemPrompt(directory string) (string, error) {
+	content, err := os.ReadFile(filepath.Join(directory, systemPromptFile))
+	switch {
+	case err == nil:
+		return strings.TrimSpace(string(content)), nil
+	case os.IsNotExist(err):
+		return strings.TrimSpace(os.Getenv("ALICE_SYSTEM_PROMPT")), nil
+	default:
+		return "", err
+	}
+}
+
+// SaveSystemPrompt guarda el prompt de sistema personalizado. Usado por
+// "/prompt <texto>" y por la pantalla dedicada al guardar con Ctrl+S.
+func SaveSystemPrompt(prompt string) error {
+	directory, err := Directory()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(directory, systemPromptFile), []byte(prompt+"\n"), 0600)
+}
+
+// ClearSystemPrompt quita el prompt de sistema, igual que ClearBraveAPIKey:
+// un archivo vacío gana siempre sobre ALICE_SYSTEM_PROMPT del entorno.
+func ClearSystemPrompt() error {
+	directory, err := Directory()
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(directory, systemPromptFile), nil, 0600)
 }

@@ -164,7 +164,7 @@ func TestDeepSeekNetworkError(t *testing.T) {
 }
 
 func TestDeepSeekUnknownError(t *testing.T) {
-	err := classifyError(errors.New("fallo inesperado"))
+	err := classifyError("DeepSeek", errors.New("fallo inesperado"))
 	if err.Error() != "⚠ Ocurrió un error\nNo se pudo completar la respuesta." {
 		t.Fatalf("mensaje inesperado: %q", err)
 	}

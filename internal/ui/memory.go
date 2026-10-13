@@ -105,18 +105,26 @@ func (m Model) checkMemoryKey() tea.Cmd {
 // extra antepone mensajes de sistema adicionales antes que los de mem0 —
 // hoy solo lo usa /search, para encadenar el contexto de Brave antes de
 // llegar al de mem0 y, finalmente, al stream de DeepSeek.
+//
+// El prompt de sistema personalizado (ver /prompt) va siempre primero,
+// antes que extra y que el contexto de mem0: define cómo se comporta Alice
+// en general, así que el resto del contexto de este turno se apila encima.
 func (m Model) fetchMemoryContext(ctx context.Context, query string, extra ...chat.Message) tea.Cmd {
 	client := m.memory
 	messages := m.messages
+	systemPrompt := m.systemPrompt
 	return func() tea.Msg {
+		augmented := make([]chat.Message, 0, len(extra)+2+len(messages))
+		if systemPrompt != "" {
+			augmented = append(augmented, chat.Message{Role: "system", Content: systemPrompt})
+		}
+		augmented = append(augmented, extra...)
 		if client == nil {
-			return memoryContextMsg{messages: append(append([]chat.Message{}, extra...), messages...)}
+			return memoryContextMsg{messages: append(augmented, messages...)}
 		}
 		searchCtx, cancel := context.WithTimeout(ctx, memorySearchTimeout)
 		defer cancel()
 		facts, _ := client.Search(searchCtx, query) // un fallo aquí deja la lista vacía, no corta el turno
-		augmented := make([]chat.Message, 0, len(extra)+1+len(messages))
-		augmented = append(augmented, extra...)
 		augmented = append(augmented, chat.Message{Role: "system", Content: formatMemoryContext(facts)})
 		augmented = append(augmented, messages...)
 		return memoryContextMsg{messages: augmented}

@@ -36,7 +36,9 @@ func main() {
 	if configuration.BraveAPIKey != "" {
 		model.SetWebSearch(search.New(configuration.BraveAPIKey))
 	}
+	model.SetVenice(configuration.VeniceAPIKey, configuration.VeniceBaseURL, configuration.VeniceModel)
 	model.SetWeather(weather.New())
+	model.SetSystemPrompt(configuration.SystemPrompt)
 	program := tea.NewProgram(model, tea.WithAltScreen())
 	if _, err := program.Run(); err != nil {
 		fail(err)

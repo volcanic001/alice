@@ -22,6 +22,7 @@ import (
 	"github.com/volcanic001/alice/internal/clipboard"
 	"github.com/volcanic001/alice/internal/config"
 	"github.com/volcanic001/alice/internal/memory"
+	"github.com/volcanic001/alice/internal/provider"
 	"github.com/volcanic001/alice/internal/search"
 	"github.com/volcanic001/alice/internal/store"
 	"github.com/volcanic001/alice/internal/usage"
@@ -55,6 +56,8 @@ const (
 	historyScreen
 	helpScreen
 	statsScreen
+	promptScreen
+	modelScreen
 )
 
 const (
@@ -103,6 +106,8 @@ type Model struct {
 	renameInput      textarea.Model
 	searchActive     bool
 	searchInput      textarea.Model
+	promptInput      textarea.Model
+	systemPrompt     string // prompt de sistema personalizado; vacío = comportamiento default
 	clipboardWrite   func(context.Context, string) error
 	clipboardTimeout time.Duration
 	memory           *memory.Client
@@ -112,6 +117,12 @@ type Model struct {
 	weather          *weather.Client
 	requestCtx       context.Context
 	lastUserContent  string
+	deepSeek         provider.DeepSeek // provider original, para volver con "/venice-key clear"
+	deepSeekModel    string
+	veniceAPIKey     string
+	veniceBaseURL    string
+	veniceModel      string
+	modelIndex       int
 }
 
 func New(database *store.Store, provider chat.Provider, requestModel string, temperature float64, usageStores ...*usage.Store) (Model, error) {
@@ -189,6 +200,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 		if m.screen == historyScreen && m.deleteConfirm {
 			return m.updateHistory(key)
 		}
+		if m.screen == promptScreen {
+			return m.updateSystemPrompt(message, key)
+		}
 		if m.screen == helpScreen {
 			switch key {
 			case "esc":
@@ -207,6 +221,9 @@ func (m Model) Update(message tea.Msg) (tea.Model, tea.Cmd) {
 				return m.showChat()
 			}
 			return m, nil
+		}
+		if m.screen == modelScreen {
+			return m.updateModelPicker(key)
 		}
 		if key == "ctrl+n" {
 			if !m.busy {
@@ -466,6 +483,10 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 		m.input.Reset()
 		next, command := m.copyLastResponse()
 		return next, command, true
+	case "/model":
+		m.input.Reset()
+		next, command := m.showModelPicker()
+		return next, command, true
 	default:
 		if strings.HasPrefix(content, "/memory") {
 			m.input.Reset()
@@ -493,10 +514,22 @@ func (m Model) runLocalCommand(content string) (tea.Model, tea.Cmd, bool) {
 			next, command := m.beginNews(query)
 			return next, command, true
 		}
+		if strings.HasPrefix(content, "/prompt") {
+			m.input.Reset()
+			argument := strings.TrimSpace(strings.TrimPrefix(content, "/prompt"))
+			next, command := m.handleSystemPromptCommand(argument)
+			return next, command, true
+		}
 		if strings.HasPrefix(content, "/weather") {
 			m.input.Reset()
 			argument := strings.TrimSpace(strings.TrimPrefix(content, "/weather"))
 			next, command := m.handleWeatherCommand(argument)
+			return next, command, true
+		}
+		if strings.HasPrefix(content, "/venice-key") {
+			m.input.Reset()
+			argument := strings.TrimSpace(strings.TrimPrefix(content, "/venice-key"))
+			next, command := m.handleVeniceKeyCommand(argument)
 			return next, command, true
 		}
 		if strings.HasPrefix(content, "/") {
@@ -837,6 +870,10 @@ func (m *Model) resize() {
 	if m.searchActive {
 		m.searchInput.SetWidth(layout.contentWidth)
 	}
+	if m.screen == promptScreen {
+		m.promptInput.SetWidth(layout.contentWidth)
+		m.promptInput.SetHeight(max(5, m.height-10))
+	}
 	m.viewport.Height = m.conversationHeight()
 	m.refresh()
 }
@@ -1087,6 +1124,12 @@ func (m Model) View() string {
 	if m.screen == statsScreen {
 		return m.statsView()
 	}
+	if m.screen == promptScreen {
+		return m.promptView()
+	}
+	if m.screen == modelScreen {
+		return m.modelPickerView()
+	}
 	header := m.chatHeader(m.viewport.Width)
 	main := lipgloss.NewStyle().Width(m.viewport.Width).Render(lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().Width(m.viewport.Width).Render(header),
@@ -1102,10 +1145,12 @@ func (m Model) helpView() string {
 	var body strings.Builder
 	body.WriteString(logoStyle.Render("◆ ALICE") + " · " + mutedStyle.Render("AYUDA") + "\n\n")
 	body.WriteString(logoStyle.Render("COMANDOS") + "\n")
-	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n\n")
+	body.WriteString("/help        Mostrar ayuda\n/stats       Uso de la API\n/new         Nuevo chat\n/history     Historial\n/copy        Copiar última respuesta\n/model       Elegir el modelo activo (DeepSeek / Venice)\n\n")
 	body.WriteString("/memory      Ver estado de la memoria (mem0)\n/memory <key> Activar/cambiar la memoria\n/memory clear Desactivar la memoria\n\n")
 	body.WriteString("/search <pregunta>   Buscar en internet y responder\n/news <tema>         Noticias de últimas 24h y responder\n/search-key          Ver estado de la búsqueda web (Brave)\n/search-key <key>    Activar/cambiar la clave de Brave\n/search-key clear    Desactivar la búsqueda web\n\n")
 	body.WriteString("/weather                Clima en tu ciudad default\n/weather <ciudad>       Clima de una ciudad guardada (nombre o parte)\n/weather add <ciudad>   Guardar una ciudad\n/weather list           Ver ciudades guardadas\n/weather remove <ciudad> Quitar una ciudad\n\n")
+	body.WriteString("/prompt        Editar el prompt de sistema en una pantalla dedicada\n/prompt <texto> Definir el prompt de sistema directamente\n/prompt clear  Quitar el prompt de sistema\n\n")
+	body.WriteString("/venice-key          Ver estado de Venice\n/venice-key <key>    Activar/cambiar la clave de Venice\n/venice-key clear    Desactivar Venice (vuelve a DeepSeek)\n\n")
 	body.WriteString(logoStyle.Render("ATAJOS") + "\n")
 	body.WriteString("Ctrl+N       Nuevo chat\nCtrl+H       Historial\n\n")
 	body.WriteString(logoStyle.Render("NAVEGACIÓN") + "\n")

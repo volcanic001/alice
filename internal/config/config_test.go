@@ -12,6 +12,7 @@ func TestLoadUsesEffectiveDeepSeekFlashConfiguration(t *testing.T) {
 	t.Setenv("DEEPSEEK_API_KEY", "test")
 	t.Setenv("MEM0_API_KEY", "")
 	t.Setenv("BRAVE_API_KEY", "")
+	t.Setenv("ALICE_SYSTEM_PROMPT", "")
 
 	configuration, err := Load()
 	if err != nil {
@@ -31,6 +32,9 @@ func TestLoadUsesEffectiveDeepSeekFlashConfiguration(t *testing.T) {
 	}
 	if configuration.BraveAPIKey != "" {
 		t.Fatalf("la búsqueda web debería quedar desactivada sin BRAVE_API_KEY: %+v", configuration)
+	}
+	if configuration.SystemPrompt != "" {
+		t.Fatalf("no debería haber prompt de sistema sin configurar: %+v", configuration)
 	}
 }
 
@@ -138,5 +142,58 @@ func TestClearBraveAPIKeyWinsOverStaleEnvVar(t *testing.T) {
 	}
 	if configuration.BraveAPIKey != "" {
 		t.Fatalf("/search-key clear debe ganarle a una BRAVE_API_KEY del entorno: %+v", configuration)
+	}
+}
+
+func TestLoadFallsBackToSystemPromptEnvVar(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "test")
+	t.Setenv("ALICE_SYSTEM_PROMPT", "Eres un asistente pirata")
+
+	configuration, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.SystemPrompt != "Eres un asistente pirata" {
+		t.Fatalf("SystemPrompt = %q, se esperaba el valor de ALICE_SYSTEM_PROMPT", configuration.SystemPrompt)
+	}
+}
+
+func TestSaveSystemPromptActivatesItWithoutEnvVar(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "test")
+	t.Setenv("ALICE_SYSTEM_PROMPT", "")
+
+	if err := SaveSystemPrompt("Responde siempre en español neutro"); err != nil {
+		t.Fatal(err)
+	}
+
+	configuration, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.SystemPrompt != "Responde siempre en español neutro" {
+		t.Fatalf("Load no recogió el prompt guardado por /prompt: %+v", configuration)
+	}
+}
+
+func TestClearSystemPromptWinsOverStaleEnvVar(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("DEEPSEEK_API_KEY", "test")
+	t.Setenv("ALICE_SYSTEM_PROMPT", "prompt viejo del entorno")
+
+	if err := SaveSystemPrompt("prompt desde la app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := ClearSystemPrompt(); err != nil {
+		t.Fatal(err)
+	}
+
+	configuration, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if configuration.SystemPrompt != "" {
+		t.Fatalf("/prompt clear debe ganarle a un ALICE_SYSTEM_PROMPT del entorno: %+v", configuration)
 	}
 }

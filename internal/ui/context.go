@@ -28,6 +28,8 @@ func contextWindow(model string) (int, bool) {
 	switch model {
 	case provider.DeepSeekFlashModel:
 		return provider.DeepSeekFlashContextWindow, true
+	case provider.VeniceRecommendedModel:
+		return provider.VeniceRecommendedContextWindow, true
 	default:
 		return 0, false
 	}
